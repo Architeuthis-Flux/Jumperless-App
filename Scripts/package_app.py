@@ -17,7 +17,7 @@ from pathlib import Path
 
 def create_python_fallback(platform, arch, output_dir):
     """Create Python fallback package with launcher script"""
-    print(f"📦 Creating Python fallback package for {platform}-{arch}")
+    print(f"Creating Python fallback package for {platform}-{arch}")
     
     python_dir = output_dir / "Jumperless Python"
     python_dir.mkdir(parents=True, exist_ok=True)
@@ -38,7 +38,7 @@ def create_python_fallback(platform, arch, output_dir):
     # Create README for Python fallback
     create_python_readme(python_dir, platform)
     
-    print(f"✅ Python fallback package created in {python_dir}")
+    print(f"Python fallback package created in {python_dir}")
 
 def create_launcher_scripts(python_dir, platform):
     """Create platform-specific launcher scripts"""
@@ -267,13 +267,13 @@ For support, visit: https://github.com/Architeuthis-Flux/JumperlessV5
 
 def package_linux(arch, output_dir):
     """Package for Linux using existing Linux packager"""
-    print(f"📦 Packaging for Linux {arch}")
+    print(f"Packaging for Linux {arch}")
     
     # Use existing packager
     if Path("Packager/JumperlessAppPackagerLinux.py").exists():
         subprocess.run([sys.executable, "Packager/JumperlessAppPackagerLinux.py"], check=True)
     else:
-        print("⚠️  Linux packager not found, creating basic package")
+        print("WARNING: Linux packager not found, creating basic package")
         
     # Create basic Linux package structure
     linux_dir = output_dir / "linux"
@@ -290,11 +290,11 @@ def package_linux(arch, output_dir):
     # Create main README
     create_platform_readme(linux_dir, "linux")
     
-    print(f"✅ Linux package created in {linux_dir}")
+    print(f"Linux package created in {linux_dir}")
 
 def package_macos(arch, output_dir):
     """Package for macOS"""
-    print(f"📦 Packaging for macOS {arch}")
+    print(f"Packaging for macOS {arch}")
     
     macos_dir = output_dir / "macos"
     macos_dir.mkdir(parents=True, exist_ok=True)
@@ -315,13 +315,13 @@ def package_macos(arch, output_dir):
         subprocess.run(["create-dmg", "--version"], check=True, capture_output=True)
         create_macos_dmg(macos_dir, arch)
     except (subprocess.CalledProcessError, FileNotFoundError):
-        print("⚠️  create-dmg not available, skipping DMG creation")
+        print("WARNING: create-dmg not available, skipping DMG creation")
     
-    print(f"✅ macOS package created in {macos_dir}")
+    print(f"macOS package created in {macos_dir}")
 
 def create_macos_dmg(macos_dir, arch):
     """Create macOS DMG"""
-    print("📦 Creating macOS DMG...")
+    print("Creating macOS DMG...")
     
     dmg_name = f"Jumperless-macOS-{arch}.dmg"
     
@@ -343,11 +343,11 @@ def create_macos_dmg(macos_dir, arch):
         str(macos_dir)
     ], check=True)
    
-    print(f"✅ DMG created: {dmg_name}")
+    print(f"DMG created: {dmg_name}")
 
 def package_windows(arch, output_dir):
     """Package for Windows"""
-    print(f"📦 Packaging for Windows {arch}")
+    print(f"Packaging for Windows {arch}")
     
     windows_dir = output_dir / "windows"
     windows_dir.mkdir(parents=True, exist_ok=True)
@@ -362,7 +362,7 @@ def package_windows(arch, output_dir):
     # Create main README
     create_platform_readme(windows_dir, "windows")
     
-    print(f"✅ Windows package created in {windows_dir}")
+    print(f"Windows package created in {windows_dir}")
 
 def create_platform_readme(platform_dir, platform):
     """Create main README for platform"""
@@ -447,11 +447,11 @@ See LICENSE file for details.
 
 def create_archives(platform, output_dir):
     """Create compressed archives of the packages"""
-    print(f"📦 Creating archives for {platform}")
+    print(f"Creating archives for {platform}")
     
     platform_dir = output_dir / platform
     if not platform_dir.exists():
-        print(f"⚠️  No {platform} directory found")
+        print(f"WARNING: No {platform} directory found")
         return
     
     # Create ZIP archive (universal)
@@ -469,7 +469,7 @@ def create_archives(platform, output_dir):
         with tarfile.open(tar_path, 'w:gz') as tar:
             tar.add(platform_dir, arcname=f"Jumperless-{platform.title()}")
     
-    print(f"✅ Archives created for {platform}")
+    print(f"Archives created for {platform}")
 
 def main():
     """Main packaging function"""
@@ -479,7 +479,7 @@ def main():
     
     args = parser.parse_args()
     
-    print(f"🚀 Packaging Jumperless for {args.platform}-{args.arch}")
+    print(f"Packaging Jumperless for {args.platform}-{args.arch}")
     print("=" * 60)
     
     # Create output directory
@@ -497,8 +497,8 @@ def main():
     # Create archives
     create_archives(args.platform, output_dir)
     
-    print(f"\n🎉 Packaging complete for {args.platform}-{args.arch}!")
-    print(f"📦 Output directory: {output_dir}")
+    print(f"\nPackaging complete for {args.platform}-{args.arch}!")
+    print(f"Output directory: {output_dir}")
     
     return 0
 

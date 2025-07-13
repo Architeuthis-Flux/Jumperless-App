@@ -111,7 +111,7 @@ VSVersionInfo(
     with open('version_info.txt', 'w', encoding='utf-8') as f:
         f.write(version_info_content)
     
-    print(f"✅ Created version_info.txt with version {version}")
+    print(f"Created version_info.txt with version {version}")
 
 if __name__ == "__main__":
     create_version_info() 

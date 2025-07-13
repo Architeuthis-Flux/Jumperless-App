@@ -13,10 +13,10 @@ from pathlib import Path
 
 def test_executable(executable_path, platform):
     """Test that an executable runs without crashing"""
-    print(f"🧪 Testing executable: {executable_path}")
+    print(f"Testing executable: {executable_path}")
     
     if not Path(executable_path).exists():
-        print(f"❌ Executable not found: {executable_path}")
+        print(f"ERROR: Executable not found: {executable_path}")
         return False
     
     try:
@@ -30,26 +30,26 @@ def test_executable(executable_path, platform):
         )
         
         if result.returncode == 0:
-            print(f"✅ Executable runs successfully")
+            print(f"SUCCESS: Executable runs successfully")
             return True
         else:
-            print(f"⚠️  Executable returned non-zero exit code: {result.returncode}")
+            print(f"WARNING: Executable returned non-zero exit code: {result.returncode}")
             print(f"STDERR: {result.stderr}")
             return False
             
     except subprocess.TimeoutExpired:
-        print(f"⚠️  Executable timed out (might be waiting for input)")
+        print(f"WARNING: Executable timed out (might be waiting for input)")
         return True  # This is often expected for interactive apps
     except Exception as e:
-        print(f"❌ Error running executable: {e}")
+        print(f"ERROR: Error running executable: {e}")
         return False
 
 def test_python_fallback(python_dir, platform):
     """Test that the Python fallback works"""
-    print(f"🧪 Testing Python fallback: {python_dir}")
+    print(f"Testing Python fallback: {python_dir}")
     
     if not Path(python_dir).exists():
-        print(f"❌ Python fallback directory not found: {python_dir}")
+        print(f"ERROR: Python fallback directory not found: {python_dir}")
         return False
     
     # Check required files exist
@@ -63,42 +63,42 @@ def test_python_fallback(python_dir, platform):
     for file in required_files:
         file_path = Path(python_dir) / file
         if not file_path.exists():
-            print(f"❌ Required file missing: {file}")
+            print(f"ERROR: Required file missing: {file}")
             return False
     
     # Check platform-specific launcher
     if platform in ['linux', 'macos']:
         launcher_path = Path(python_dir) / "run_jumperless.sh"
         if not launcher_path.exists():
-            print(f"❌ Shell launcher missing: {launcher_path}")
+            print(f"ERROR: Shell launcher missing: {launcher_path}")
             return False
         
         # Check if it's executable
         if not os.access(launcher_path, os.X_OK):
-            print(f"❌ Shell launcher not executable: {launcher_path}")
+            print(f"ERROR: Shell launcher not executable: {launcher_path}")
             return False
     
     elif platform == 'windows':
         launcher_path = Path(python_dir) / "run_jumperless.bat"
         if not launcher_path.exists():
-            print(f"❌ Batch launcher missing: {launcher_path}")
+            print(f"ERROR: Batch launcher missing: {launcher_path}")
             return False
     
-    print(f"✅ Python fallback structure is valid")
+    print(f"SUCCESS: Python fallback structure is valid")
     return True
 
 def test_package_structure(platform_dir, platform):
     """Test that the package structure is correct"""
-    print(f"🧪 Testing package structure: {platform_dir}")
+    print(f"Testing package structure: {platform_dir}")
     
     if not Path(platform_dir).exists():
-        print(f"❌ Package directory not found: {platform_dir}")
+        print(f"ERROR: Package directory not found: {platform_dir}")
         return False
     
     # Check main README
     readme_path = Path(platform_dir) / "README.md"
     if not readme_path.exists():
-        print(f"❌ Main README missing: {readme_path}")
+        print(f"ERROR: Main README missing: {readme_path}")
         return False
     
     # Check executable
@@ -108,16 +108,16 @@ def test_package_structure(platform_dir, platform):
     
     executable_path = Path(platform_dir) / executable_name
     if not executable_path.exists():
-        print(f"❌ Main executable missing: {executable_path}")
+        print(f"ERROR: Main executable missing: {executable_path}")
         return False
     
     # Check Python fallback directory
     python_dir = Path(platform_dir) / "Jumperless Python"
     if not python_dir.exists():
-        print(f"❌ Python fallback directory missing: {python_dir}")
+        print(f"ERROR: Python fallback directory missing: {python_dir}")
         return False
     
-    print(f"✅ Package structure is valid")
+    print(f"SUCCESS: Package structure is valid")
     return True
 
 def main():
@@ -127,7 +127,7 @@ def main():
     
     args = parser.parse_args()
     
-    print(f"🧪 Running smoke tests for {args.platform}")
+    print(f"Running smoke tests for {args.platform}")
     print("=" * 50)
     
     # Test paths
@@ -136,7 +136,7 @@ def main():
     # Test package structure
     structure_ok = test_package_structure(platform_dir, args.platform)
     if not structure_ok:
-        print("❌ Package structure test failed")
+        print("ERROR: Package structure test failed")
         return 1
     
     # Test executable
@@ -153,16 +153,16 @@ def main():
     
     # Summary
     print("\n" + "=" * 50)
-    print("🧪 Smoke Test Results:")
-    print(f"  Package Structure: {'✅ PASS' if structure_ok else '❌ FAIL'}")
-    print(f"  Executable Test:   {'✅ PASS' if executable_ok else '❌ FAIL'}")
-    print(f"  Python Fallback:   {'✅ PASS' if python_ok else '❌ FAIL'}")
+    print("Smoke Test Results:")
+    print(f"  Package Structure: {'PASS' if structure_ok else 'FAIL'}")
+    print(f"  Executable Test:   {'PASS' if executable_ok else 'FAIL'}")
+    print(f"  Python Fallback:   {'PASS' if python_ok else 'FAIL'}")
     
     if all([structure_ok, executable_ok, python_ok]):
-        print("\n🎉 All smoke tests passed!")
+        print("\nAll smoke tests passed!")
         return 0
     else:
-        print("\n❌ Some smoke tests failed!")
+        print("\nSome smoke tests failed!")
         return 1
 
 if __name__ == "__main__":

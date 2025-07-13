@@ -215,7 +215,7 @@ https://github.com/Architeuthis-Flux/JumperlessV5
     with open(readme_path, 'w', encoding='utf-8') as f:
         f.write(readme_content)
     
-    print(f"✅ Created combined README: {readme_path}")
+    print(f"Created combined README: {readme_path}")
 
 if __name__ == "__main__":
     create_combined_readme() 
