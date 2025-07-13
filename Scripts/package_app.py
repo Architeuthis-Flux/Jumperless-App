@@ -329,17 +329,17 @@ def create_macos_dmg(macos_dir, arch):
         
         # Basic DMG creation with simpler arguments
         cmd = [
-            "create-dmg",
-            "--volname", "Jumperless",
+        "create-dmg",
+        "--volname", "Jumperless",
             "--window-size", "600", "400",
-            "--icon-size", "100",
-            dmg_name,
+        "--icon-size", "100",
+        dmg_name,
             str(temp_dir)
         ]
-        
+   
         subprocess.run(cmd, check=True)
         print(f"DMG created: {dmg_name}")
-        
+
     except subprocess.CalledProcessError as e:
         print(f"Warning: DMG creation failed: {e}")
     finally:
