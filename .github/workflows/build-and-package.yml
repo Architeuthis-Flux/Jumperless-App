@@ -2,10 +2,10 @@ name: Build and Package Jumperless App
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ MessingAroundWithWorkflows, develop ]
     tags: [ 'v*' ]
   pull_request:
-    branches: [ main ]
+    branches: [ MessingAroundWithWorkflows ]
   workflow_dispatch:
 
 env:
