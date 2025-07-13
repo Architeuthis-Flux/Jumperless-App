@@ -93,9 +93,9 @@ VSVersionInfo(
             StringStruct(u'CompanyName', u'Jumperless Project'),
             StringStruct(u'FileDescription', u'Jumperless Wokwi Bridge'),
             StringStruct(u'FileVersion', u'{version}'),
-            StringStruct(u'InternalName', u'JumperlessWokwiBridge'),
+            StringStruct(u'InternalName', u'Jumperless'),
             StringStruct(u'LegalCopyright', u'© 2025 Jumperless Project'),
-            StringStruct(u'OriginalFilename', u'JumperlessWokwiBridge.exe'),
+            StringStruct(u'OriginalFilename', u'Jumperless.exe'),
             StringStruct(u'ProductName', u'Jumperless Wokwi Bridge'),
             StringStruct(u'ProductVersion', u'{version}'),
           ]

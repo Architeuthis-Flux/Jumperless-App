@@ -95,7 +95,7 @@ def main():
     print("Starting Jumperless...")
     try:
         # Import and run the main application
-        spec = importlib.util.spec_from_file_location("JumperlessWokwiBridge", "JumperlessWokwiBridge.py")
+        spec = importlib.util.spec_from_file_location("Jumperless", "JumperlessWokwiBridge.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         if hasattr(module, 'main'):
@@ -272,7 +272,7 @@ def package_platform(platform, arch, output_dir):
     platform_dir.mkdir(parents=True, exist_ok=True)
     
     # Copy executable if it exists
-    executable_name = "JumperlessWokwiBridge"
+    executable_name = "Jumperless"
     if platform == "windows":
         executable_name += ".exe"
     
@@ -368,7 +368,7 @@ This package contains Jumperless built for {platform_name}.
     if platform == "linux":
         readme_content += '''
 ```bash
-./JumperlessWokwiBridge
+./Jumperless
 ```
 
 Or double-click the executable in your file manager.
@@ -376,16 +376,16 @@ Or double-click the executable in your file manager.
     elif platform == "macos":
         readme_content += '''
 ```bash
-./JumperlessWokwiBridge
+./Jumperless
 ```
 
 Or double-click the executable in Finder.
 '''
     elif platform == "windows":
         readme_content += '''
-Double-click `JumperlessWokwiBridge.exe` or run from Command Prompt:
+Double-click `Jumperless.exe` or run from Command Prompt:
 ```cmd
-JumperlessWokwiBridge.exe
+Jumperless.exe
 ```
 '''
     
@@ -399,7 +399,7 @@ If the native executable doesn't work, use the Python fallback:
 
 ## Package Contents
 
-- `JumperlessWokwiBridge''' + ('.exe' if platform == 'windows' else '') + '''` - Native executable
+- `Jumperless''' + ('.exe' if platform == 'windows' else '') + '''` - Native executable
 - `Jumperless Python/` - Python source code fallback
 - `README.md` - This file
 

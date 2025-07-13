@@ -102,7 +102,7 @@ def test_package_structure(platform_dir, platform):
         return False
     
     # Check executable
-    executable_name = "JumperlessWokwiBridge"
+    executable_name = "Jumperless"
     if platform == "windows":
         executable_name += ".exe"
     
@@ -140,7 +140,7 @@ def main():
         return 1
     
     # Test executable
-    executable_name = "JumperlessWokwiBridge"
+    executable_name = "Jumperless"
     if args.platform == "windows":
         executable_name += ".exe"
     

@@ -22,7 +22,7 @@ jobs:
             platform: linux
             arch: x64
             artifact-name: "Jumperless-Linux-x64"
-            executable-name: "JumperlessWokwiBridge"
+            executable-name: "Jumperless"
             icon-path: "assets/icons/icon.png"
             
           # macOS builds (Intel)
@@ -30,7 +30,7 @@ jobs:
             platform: macos
             arch: x64
             artifact-name: "Jumperless-macOS-Intel"
-            executable-name: "JumperlessWokwiBridge"
+            executable-name: "Jumperless"
             icon-path: "assets/icons/icon.icns"
             
           # macOS builds (Apple Silicon)
@@ -38,7 +38,7 @@ jobs:
             platform: macos
             arch: arm64
             artifact-name: "Jumperless-macOS-Apple-Silicon"
-            executable-name: "JumperlessWokwiBridge"
+            executable-name: "Jumperless"
             icon-path: "assets/icons/icon.icns"
             
           # Windows builds
@@ -46,7 +46,7 @@ jobs:
             platform: windows
             arch: x64
             artifact-name: "Jumperless-Windows-x64"
-            executable-name: "JumperlessWokwiBridge"
+            executable-name: "Jumperless"
             icon-path: "assets/icons/icon.ico"
 
     runs-on: ${{ matrix.os }}
@@ -112,9 +112,9 @@ jobs:
         CURRENT_DIR=$(pwd)
         echo "Current working directory: $CURRENT_DIR"
         
-        # Use the spec file for consistent builds
-        echo "Building with PyInstaller spec file"
-        python -m PyInstaller --clean jumperless.spec --distpath dist/linux --workpath build/linux --specpath build/linux
+        # Use PyInstaller with direct command line arguments for consistent builds
+        echo "Building with PyInstaller"
+        python -m PyInstaller --clean --onefile --console --name "Jumperless" --distpath dist/linux --workpath build/linux --icon "assets/icons/icon.png" JumperlessWokwiBridge.py
           
     - name: Build with PyInstaller (macOS)
       if: matrix.platform == 'macos'
@@ -125,9 +125,9 @@ jobs:
         echo "Contents of current directory:"
         ls -la
         
-        # Use the spec file for consistent builds
-        echo "Building with PyInstaller spec file"
-        python -m PyInstaller --clean jumperless.spec --distpath dist/macos --workpath build/macos --specpath build/macos
+        # Use PyInstaller with direct command line arguments for consistent builds
+        echo "Building with PyInstaller"
+        python -m PyInstaller --clean --onefile --console --name "Jumperless" --distpath dist/macos --workpath build/macos --icon "assets/icons/icon.icns" JumperlessWokwiBridge.py
           
     - name: Build with PyInstaller (Windows)
       if: matrix.platform == 'windows'
@@ -138,9 +138,9 @@ jobs:
         Write-Host "Contents of current directory:"
         Get-ChildItem
         
-        # Use the spec file for consistent builds
-        Write-Host "Building with PyInstaller spec file"
-        & python -m PyInstaller --clean jumperless.spec --distpath dist/windows --workpath build/windows --specpath build/windows
+        # Use PyInstaller with direct command line arguments for consistent builds
+        Write-Host "Building with PyInstaller"
+        & python -m PyInstaller --clean --onefile --console --name "Jumperless" --distpath dist/windows --workpath build/windows --icon "assets/icons/icon.ico" JumperlessWokwiBridge.py
       shell: pwsh
           
     - name: Create platform-specific package (Linux)
@@ -205,7 +205,7 @@ jobs:
         cp -r artifacts/* combined-release/
         
         # Create combined README
-        python scripts/create_combined_readme.py
+        python Scripts/create_combined_readme.py
         
     - name: Upload combined release
       uses: softprops/action-gh-release@v2
