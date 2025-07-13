@@ -95,17 +95,6 @@ jobs:
       run: |
         python -m PyInstaller --version
         
-    - name: List workspace contents (debug)
-      run: |
-        echo "Current directory contents:"
-        ls -la
-        echo ""
-        echo "Assets directory (if exists):"
-        ls -la assets/ || echo "No assets directory found"
-        echo ""
-        echo "Assets/icons directory (if exists):"
-        ls -la assets/icons/ || echo "No assets/icons directory found"
-        
     - name: Create version info file (Windows)
       if: matrix.platform == 'windows'
       run: |
@@ -119,21 +108,28 @@ jobs:
     - name: Build with PyInstaller (Linux)
       if: matrix.platform == 'linux'
       run: |
+        # Get absolute paths to avoid PyInstaller path issues
+        CURRENT_DIR=$(pwd)
+        echo "Current working directory: $CURRENT_DIR"
+        
         # Build PyInstaller command dynamically
         PYINSTALLER_CMD="python -m PyInstaller --clean --onefile --console --name ${{ matrix.executable-name }} --distpath dist/linux --workpath build/linux --specpath build/linux"
         
-        # Add icon if it exists
+        # Add icon if it exists (use absolute path)
         if [ -f "${{ matrix.icon-path }}" ]; then
-          PYINSTALLER_CMD="$PYINSTALLER_CMD --icon ${{ matrix.icon-path }}"
-          echo "Using icon: ${{ matrix.icon-path }}"
+          ICON_PATH="$CURRENT_DIR/${{ matrix.icon-path }}"
+          PYINSTALLER_CMD="$PYINSTALLER_CMD --icon $ICON_PATH"
+          echo "Using icon: $ICON_PATH"
         else
           echo "Icon not found: ${{ matrix.icon-path }}, building without icon"
         fi
         
-        # Add assets if directory exists
+        # Add assets if directory exists (use absolute path)
         if [ -d "assets" ]; then
-          PYINSTALLER_CMD="$PYINSTALLER_CMD --add-data assets:assets"
-          echo "Including assets directory"
+          ASSETS_PATH="$CURRENT_DIR/assets"
+          echo "Assets directory found at: $ASSETS_PATH"
+          PYINSTALLER_CMD="$PYINSTALLER_CMD --add-data $ASSETS_PATH:assets"
+          echo "Including assets directory with absolute path"
         else
           echo "Assets directory not found, building without assets"
         fi
@@ -141,27 +137,38 @@ jobs:
         # Add the main script
         PYINSTALLER_CMD="$PYINSTALLER_CMD JumperlessWokwiBridge.py"
         
-        echo "Running: $PYINSTALLER_CMD"
+        echo "Final PyInstaller command: $PYINSTALLER_CMD"
         eval $PYINSTALLER_CMD
           
     - name: Build with PyInstaller (macOS)
       if: matrix.platform == 'macos'
       run: |
+        # Get absolute paths to avoid PyInstaller path issues
+        CURRENT_DIR=$(pwd)
+        echo "Current working directory: $CURRENT_DIR"
+        echo "Contents of current directory:"
+        ls -la
+        
         # Build PyInstaller command dynamically
         PYINSTALLER_CMD="python -m PyInstaller --clean --onefile --console --name ${{ matrix.executable-name }} --distpath dist/macos --workpath build/macos --specpath build/macos"
         
-        # Add icon if it exists
+        # Add icon if it exists (use absolute path)
         if [ -f "${{ matrix.icon-path }}" ]; then
-          PYINSTALLER_CMD="$PYINSTALLER_CMD --icon ${{ matrix.icon-path }}"
-          echo "Using icon: ${{ matrix.icon-path }}"
+          ICON_PATH="$CURRENT_DIR/${{ matrix.icon-path }}"
+          PYINSTALLER_CMD="$PYINSTALLER_CMD --icon $ICON_PATH"
+          echo "Using icon: $ICON_PATH"
         else
           echo "Icon not found: ${{ matrix.icon-path }}, building without icon"
         fi
         
-        # Add assets if directory exists
+        # Add assets if directory exists (use absolute path)
         if [ -d "assets" ]; then
-          PYINSTALLER_CMD="$PYINSTALLER_CMD --add-data assets:assets"
-          echo "Including assets directory"
+          ASSETS_PATH="$CURRENT_DIR/assets"
+          echo "Assets directory found at: $ASSETS_PATH"
+          echo "Contents of assets directory:"
+          ls -la assets/
+          PYINSTALLER_CMD="$PYINSTALLER_CMD --add-data $ASSETS_PATH:assets"
+          echo "Including assets directory with absolute path"
         else
           echo "Assets directory not found, building without assets"
         fi
@@ -169,12 +176,18 @@ jobs:
         # Add the main script
         PYINSTALLER_CMD="$PYINSTALLER_CMD JumperlessWokwiBridge.py"
         
-        echo "Running: $PYINSTALLER_CMD"
+        echo "Final PyInstaller command: $PYINSTALLER_CMD"
         eval $PYINSTALLER_CMD
           
     - name: Build with PyInstaller (Windows)
       if: matrix.platform == 'windows'
       run: |
+        # Get absolute paths to avoid PyInstaller path issues
+        $CurrentDir = Get-Location
+        Write-Host "Current working directory: $CurrentDir"
+        Write-Host "Contents of current directory:"
+        Get-ChildItem
+        
         # Build PyInstaller command dynamically
         $PyInstallerArgs = @(
           "--clean",
@@ -186,34 +199,40 @@ jobs:
           "--specpath", "build/windows"
         )
         
-        # Add version file if it exists
-        if (Test-Path "version_info.txt") {
-          $PyInstallerArgs += "--version-file", "version_info.txt"
-          Write-Host "Using version file: version_info.txt"
+        # Add version file if it exists (use absolute path)
+        $VersionFile = Join-Path $CurrentDir "version_info.txt"
+        if (Test-Path $VersionFile) {
+          $PyInstallerArgs += "--version-file", $VersionFile
+          Write-Host "Using version file: $VersionFile"
         } else {
-          Write-Host "Version file not found, building without version info"
+          Write-Host "Version file not found: $VersionFile, building without version info"
         }
         
-        # Add icon if it exists
-        if (Test-Path "${{ matrix.icon-path }}") {
-          $PyInstallerArgs += "--icon", "${{ matrix.icon-path }}"
-          Write-Host "Using icon: ${{ matrix.icon-path }}"
+        # Add icon if it exists (use absolute path)
+        $IconPath = Join-Path $CurrentDir "${{ matrix.icon-path }}"
+        if (Test-Path $IconPath) {
+          $PyInstallerArgs += "--icon", $IconPath
+          Write-Host "Using icon: $IconPath"
         } else {
-          Write-Host "Icon not found: ${{ matrix.icon-path }}, building without icon"
+          Write-Host "Icon not found: $IconPath, building without icon"
         }
         
-        # Add assets if directory exists
-        if (Test-Path "assets") {
-          $PyInstallerArgs += "--add-data", "assets;assets"
-          Write-Host "Including assets directory"
+        # Add assets if directory exists (use absolute path)
+        $AssetsPath = Join-Path $CurrentDir "assets"
+        if (Test-Path $AssetsPath) {
+          Write-Host "Assets directory found at: $AssetsPath"
+          Write-Host "Contents of assets directory:"
+          Get-ChildItem $AssetsPath
+          $PyInstallerArgs += "--add-data", "$AssetsPath;assets"
+          Write-Host "Including assets directory with absolute path"
         } else {
-          Write-Host "Assets directory not found, building without assets"
+          Write-Host "Assets directory not found: $AssetsPath, building without assets"
         }
         
         # Add the main script
         $PyInstallerArgs += "JumperlessWokwiBridge.py"
         
-        Write-Host "Running PyInstaller with args: $($PyInstallerArgs -join ' ')"
+        Write-Host "Final PyInstaller command args: $($PyInstallerArgs -join ' ')"
         & python -m PyInstaller @PyInstallerArgs
       shell: pwsh
           
