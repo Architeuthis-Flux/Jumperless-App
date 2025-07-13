@@ -123,7 +123,7 @@ Each platform package includes:
 
 ```
 Jumperless-[Platform]/
-├── JumperlessWokwiBridge[.exe]     # Native executable
+├── Jumperless[.exe]     # Native executable
 ├── README.md                       # Platform-specific instructions
 └── Jumperless Python/              # Python fallback
     ├── JumperlessWokwiBridge.py    # Main application
@@ -169,13 +169,13 @@ python scripts/smoke_test.py --platform [linux|macos|windows]
 
 ```bash
 # Linux
-python -m PyInstaller --onefile --console --name "JumperlessWokwiBridge" --icon "assets/icons/icon.png" JumperlessWokwiBridge.py
+python -m PyInstaller --onefile --console --name "Jumperless" --icon "assets/icons/icon.png" JumperlessWokwiBridge.py
 
 # macOS
-python -m PyInstaller --onefile --console --name "JumperlessWokwiBridge" --icon "assets/icons/icon.icns" JumperlessWokwiBridge.py
+python -m PyInstaller --onefile --console --name "Jumperless" --icon "assets/icons/icon.icns" JumperlessWokwiBridge.py
 
 # Windows
-python -m PyInstaller --onefile --console --name "JumperlessWokwiBridge" --icon "assets/icons/icon.ico" JumperlessWokwiBridge.py
+python -m PyInstaller --onefile --console --name "Jumperless" --icon "assets/icons/icon.ico" JumperlessWokwiBridge.py
 ```
 
 ## Customization
@@ -287,7 +287,7 @@ python scripts/smoke_test.py --platform your_platform
 python scripts/package_app.py --platform linux --arch x64 --verbose
 
 # Test executable locally
-./builds/linux/JumperlessWokwiBridge --help
+./builds/linux/Jumperless --help
 ```
 
 #### GitHub Actions Debugging
