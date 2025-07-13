@@ -95,6 +95,17 @@ jobs:
       run: |
         python -m PyInstaller --version
         
+    - name: List workspace contents (debug)
+      run: |
+        echo "Current directory contents:"
+        ls -la
+        echo ""
+        echo "Assets directory (if exists):"
+        ls -la assets/ || echo "No assets directory found"
+        echo ""
+        echo "Assets/icons directory (if exists):"
+        ls -la assets/icons/ || echo "No assets/icons directory found"
+        
     - name: Create version info file (Windows)
       if: matrix.platform == 'windows'
       run: |
@@ -108,48 +119,103 @@ jobs:
     - name: Build with PyInstaller (Linux)
       if: matrix.platform == 'linux'
       run: |
-        python -m PyInstaller \
-          --clean \
-          --onefile \
-          --console \
-          --name "${{ matrix.executable-name }}" \
-          --icon "${{ matrix.icon-path }}" \
-          --distpath "dist/linux" \
-          --workpath "build/linux" \
-          --specpath "build/linux" \
-          --add-data "assets:assets" \
-          JumperlessWokwiBridge.py
+        # Build PyInstaller command dynamically
+        PYINSTALLER_CMD="python -m PyInstaller --clean --onefile --console --name ${{ matrix.executable-name }} --distpath dist/linux --workpath build/linux --specpath build/linux"
+        
+        # Add icon if it exists
+        if [ -f "${{ matrix.icon-path }}" ]; then
+          PYINSTALLER_CMD="$PYINSTALLER_CMD --icon ${{ matrix.icon-path }}"
+          echo "Using icon: ${{ matrix.icon-path }}"
+        else
+          echo "Icon not found: ${{ matrix.icon-path }}, building without icon"
+        fi
+        
+        # Add assets if directory exists
+        if [ -d "assets" ]; then
+          PYINSTALLER_CMD="$PYINSTALLER_CMD --add-data assets:assets"
+          echo "Including assets directory"
+        else
+          echo "Assets directory not found, building without assets"
+        fi
+        
+        # Add the main script
+        PYINSTALLER_CMD="$PYINSTALLER_CMD JumperlessWokwiBridge.py"
+        
+        echo "Running: $PYINSTALLER_CMD"
+        eval $PYINSTALLER_CMD
           
     - name: Build with PyInstaller (macOS)
       if: matrix.platform == 'macos'
       run: |
-        python -m PyInstaller \
-          --clean \
-          --onefile \
-          --console \
-          --name "${{ matrix.executable-name }}" \
-          --icon "${{ matrix.icon-path }}" \
-          --distpath "dist/macos" \
-          --workpath "build/macos" \
-          --specpath "build/macos" \
-          --add-data "assets:assets" \
-          JumperlessWokwiBridge.py
+        # Build PyInstaller command dynamically
+        PYINSTALLER_CMD="python -m PyInstaller --clean --onefile --console --name ${{ matrix.executable-name }} --distpath dist/macos --workpath build/macos --specpath build/macos"
+        
+        # Add icon if it exists
+        if [ -f "${{ matrix.icon-path }}" ]; then
+          PYINSTALLER_CMD="$PYINSTALLER_CMD --icon ${{ matrix.icon-path }}"
+          echo "Using icon: ${{ matrix.icon-path }}"
+        else
+          echo "Icon not found: ${{ matrix.icon-path }}, building without icon"
+        fi
+        
+        # Add assets if directory exists
+        if [ -d "assets" ]; then
+          PYINSTALLER_CMD="$PYINSTALLER_CMD --add-data assets:assets"
+          echo "Including assets directory"
+        else
+          echo "Assets directory not found, building without assets"
+        fi
+        
+        # Add the main script
+        PYINSTALLER_CMD="$PYINSTALLER_CMD JumperlessWokwiBridge.py"
+        
+        echo "Running: $PYINSTALLER_CMD"
+        eval $PYINSTALLER_CMD
           
     - name: Build with PyInstaller (Windows)
       if: matrix.platform == 'windows'
       run: |
-        python -m PyInstaller \
-          --clean \
-          --onefile \
-          --console \
-          --name "${{ matrix.executable-name }}" \
-          --icon "${{ matrix.icon-path }}" \
-          --distpath "dist/windows" \
-          --workpath "build/windows" \
-          --specpath "build/windows" \
-          --add-data "assets;assets" \
-          --version-file "version_info.txt" \
-          JumperlessWokwiBridge.py
+        # Build PyInstaller command dynamically
+        $PyInstallerArgs = @(
+          "--clean",
+          "--onefile", 
+          "--console",
+          "--name", "${{ matrix.executable-name }}",
+          "--distpath", "dist/windows",
+          "--workpath", "build/windows", 
+          "--specpath", "build/windows"
+        )
+        
+        # Add version file if it exists
+        if (Test-Path "version_info.txt") {
+          $PyInstallerArgs += "--version-file", "version_info.txt"
+          Write-Host "Using version file: version_info.txt"
+        } else {
+          Write-Host "Version file not found, building without version info"
+        }
+        
+        # Add icon if it exists
+        if (Test-Path "${{ matrix.icon-path }}") {
+          $PyInstallerArgs += "--icon", "${{ matrix.icon-path }}"
+          Write-Host "Using icon: ${{ matrix.icon-path }}"
+        } else {
+          Write-Host "Icon not found: ${{ matrix.icon-path }}, building without icon"
+        }
+        
+        # Add assets if directory exists
+        if (Test-Path "assets") {
+          $PyInstallerArgs += "--add-data", "assets;assets"
+          Write-Host "Including assets directory"
+        } else {
+          Write-Host "Assets directory not found, building without assets"
+        }
+        
+        # Add the main script
+        $PyInstallerArgs += "JumperlessWokwiBridge.py"
+        
+        Write-Host "Running PyInstaller with args: $($PyInstallerArgs -join ' ')"
+        & python -m PyInstaller @PyInstallerArgs
+      shell: pwsh
           
     - name: Create platform-specific package (Linux)
       if: matrix.platform == 'linux'
