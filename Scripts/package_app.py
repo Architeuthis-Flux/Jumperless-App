@@ -23,10 +23,12 @@ def create_python_fallback(platform, arch, output_dir):
     python_dir.mkdir(parents=True, exist_ok=True)
     
     # Copy main application
-    shutil.copy2("JumperlessWokwiBridge.py", python_dir)
+    if Path("JumperlessWokwiBridge.py").exists():
+        shutil.copy2("JumperlessWokwiBridge.py", python_dir)
     
     # Copy requirements
-    shutil.copy2("requirements.txt", python_dir)
+    if Path("requirements.txt").exists():
+        shutil.copy2("requirements.txt", python_dir)
     
     # Copy assets if they exist
     if Path("assets").exists():
@@ -61,10 +63,10 @@ def install_dependencies():
     try:
         subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], 
                       check=True, capture_output=True)
-        print("✅ Dependencies installed successfully")
+        print("Dependencies installed successfully")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"❌ Failed to install dependencies: {e}")
+        print(f"Failed to install dependencies: {e}")
         print("Please install dependencies manually:")
         print(f"  {sys.executable} -m pip install -r requirements.txt")
         return False
@@ -72,11 +74,11 @@ def install_dependencies():
 def main():
     """Main launcher function"""
     print("Jumperless Python Launcher")
-    #print("=" * 40)
+    print("=" * 40)
     
     # Check if we're in the right directory
     if not Path("JumperlessWokwiBridge.py").exists():
-        print("❌ JumperlessWokwiBridge.py not found!")
+        print("JumperlessWokwiBridge.py not found!")
         print("Please run this script from the 'Jumperless Python' directory")
         sys.exit(1)
     
@@ -92,13 +94,20 @@ def main():
     # Run the main application
     print("Starting Jumperless...")
     try:
-        import JumperlessWokwiBridge
-        JumperlessWokwiBridge.main()
+        # Import and run the main application
+        spec = importlib.util.spec_from_file_location("JumperlessWokwiBridge", "JumperlessWokwiBridge.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if hasattr(module, 'main'):
+            module.main()
+        else:
+            print("Warning: No main() function found in JumperlessWokwiBridge.py")
     except Exception as e:
-        print(f"❌ Error running application: {e}")
+        print(f"Error running application: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
+    import importlib.util
     main()
 '''
     
@@ -126,11 +135,11 @@ for cmd in python3 python python3.11 python3.10 python3.9; do
 done
 
 if [ -z "$PYTHON_CMD" ]; then
-    echo "❌ Python not found! Please install Python 3.9+ and try again."
+    echo "Python not found! Please install Python 3.9+ and try again."
     exit 1
 fi
 
-echo "🐍 Using Python: $PYTHON_CMD"
+echo "Using Python: $PYTHON_CMD"
 
 # Change to script directory
 cd "$(dirname "$0")"
@@ -163,12 +172,12 @@ for %%i in (python.exe python3.exe py.exe) do (
     )
 )
 
-echo ❌ Python not found! Please install Python 3.9+ and try again.
+echo Python not found! Please install Python 3.9+ and try again.
 pause
 exit /b 1
 
 :found
-echo 🐍 Using Python: %PYTHON_CMD%
+echo Using Python: %PYTHON_CMD%
 
 REM Change to script directory
 cd /d "%~dp0"
@@ -246,16 +255,6 @@ chmod +x run_jumperless.sh
 pip install -r requirements.txt
 ```
 
-### Virtual Environment (Advanced)
-```bash
-python -m venv jumperless_env
-source jumperless_env/bin/activate  # Linux/macOS
-# or
-jumperless_env\\Scripts\\activate  # Windows
-pip install -r requirements.txt
-python JumperlessWokwiBridge.py
-```
-
 ## Support
 
 For support, visit: https://github.com/Architeuthis-Flux/JumperlessV5
@@ -265,59 +264,46 @@ For support, visit: https://github.com/Architeuthis-Flux/JumperlessV5
     with open(readme_path, 'w', encoding='utf-8') as f:
         f.write(readme_content)
 
-def package_linux(arch, output_dir):
-    """Package for Linux using existing Linux packager"""
-    print(f"Packaging for Linux {arch}")
+def package_platform(platform, arch, output_dir):
+    """Package for specific platform"""
+    print(f"Packaging for {platform} {arch}")
     
-    # Use existing packager
-    if Path("Packager/JumperlessAppPackagerLinux.py").exists():
-        subprocess.run([sys.executable, "Packager/JumperlessAppPackagerLinux.py"], check=True)
+    platform_dir = output_dir / platform
+    platform_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Copy executable if it exists
+    executable_name = "JumperlessWokwiBridge"
+    if platform == "windows":
+        executable_name += ".exe"
+    
+    executable_path = Path(f"dist/{platform}/{executable_name}")
+    if executable_path.exists():
+        shutil.copy2(executable_path, platform_dir)
+        if platform != "windows":
+            os.chmod(platform_dir / executable_name, 0o755)
+        print(f"Copied executable: {executable_name}")
     else:
-        print("WARNING: Linux packager not found, creating basic package")
-        
-    # Create basic Linux package structure
-    linux_dir = output_dir / "linux"
-    linux_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Copy executable
-    if Path("dist/linux/JumperlessWokwiBridge").exists():
-        shutil.copy2("dist/linux/JumperlessWokwiBridge", linux_dir)
-        os.chmod(linux_dir / "JumperlessWokwiBridge", 0o755)
+        print(f"Warning: Executable not found: {executable_path}")
     
     # Create Python fallback
-    create_python_fallback("linux", arch, linux_dir)
+    create_python_fallback(platform, arch, platform_dir)
     
     # Create main README
-    create_platform_readme(linux_dir, "linux")
+    create_platform_readme(platform_dir, platform)
     
-    print(f"Linux package created in {linux_dir}")
+    # Try platform-specific packaging
+    if platform == "macos":
+        try_create_macos_dmg(platform_dir, arch)
+    
+    print(f"{platform.title()} package created in {platform_dir}")
 
-def package_macos(arch, output_dir):
-    """Package for macOS"""
-    print(f"Packaging for macOS {arch}")
-    
-    macos_dir = output_dir / "macos"
-    macos_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Copy executable
-    if Path("dist/macos/JumperlessWokwiBridge").exists():
-        shutil.copy2("dist/macos/JumperlessWokwiBridge", macos_dir)
-        os.chmod(macos_dir / "JumperlessWokwiBridge", 0o755)
-    
-    # Create Python fallback
-    create_python_fallback("macos", arch, macos_dir)
-    
-    # Create main README
-    create_platform_readme(macos_dir, "macos")
-    
-    # Try to create DMG if create-dmg is available
+def try_create_macos_dmg(macos_dir, arch):
+    """Try to create macOS DMG if create-dmg is available"""
     try:
         subprocess.run(["create-dmg", "--version"], check=True, capture_output=True)
         create_macos_dmg(macos_dir, arch)
     except (subprocess.CalledProcessError, FileNotFoundError):
         print("WARNING: create-dmg not available, skipping DMG creation")
-    
-    print(f"macOS package created in {macos_dir}")
 
 def create_macos_dmg(macos_dir, arch):
     """Create macOS DMG"""
@@ -325,44 +311,41 @@ def create_macos_dmg(macos_dir, arch):
     
     dmg_name = f"Jumperless-macOS-{arch}.dmg"
     
-    # Basic DMG creation
-    subprocess.run([
-        "create-dmg",
-        "--volname", "Jumperless",
-        "--volicon", "icon.icns",
-        "--background", "JumperlessWokwiDMGwindow4x.png",
-        "--window-pos", "240", "240",
-        "--window-size", "580", "590",
-        "--icon-size", "100",
-        "--icon", "Jumperless.app", "72", "245",
-        "--app-drop-link", "395", "245",
-        "--hide-extension", "Jumperless.app",
-        "--codesign", "Kevin Cappuccio (LK2RWK9EUK)",
-        "--add-folder", "Jumperless Python", "Jumperless Python", "69", "460",
-        dmg_name,
-        str(macos_dir)
-    ], check=True)
-   
-    print(f"DMG created: {dmg_name}")
-
-def package_windows(arch, output_dir):
-    """Package for Windows"""
-    print(f"Packaging for Windows {arch}")
+    # Create a temp directory without spaces for create-dmg
+    temp_dir = Path(f"temp_dmg_{arch}")
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+    temp_dir.mkdir()
     
-    windows_dir = output_dir / "windows"
-    windows_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Copy executable
-    if Path("dist/windows/JumperlessWokwiBridge.exe").exists():
-        shutil.copy2("dist/windows/JumperlessWokwiBridge.exe", windows_dir)
-    
-    # Create Python fallback
-    create_python_fallback("windows", arch, windows_dir)
-    
-    # Create main README
-    create_platform_readme(windows_dir, "windows")
-    
-    print(f"Windows package created in {windows_dir}")
+    try:
+        # Copy contents to temp directory with simpler names
+        for item in macos_dir.iterdir():
+            if item.is_dir():
+                # Rename directories with spaces
+                safe_name = item.name.replace(" ", "_")
+                shutil.copytree(item, temp_dir / safe_name)
+            else:
+                shutil.copy2(item, temp_dir)
+        
+        # Basic DMG creation with simpler arguments
+        cmd = [
+            "create-dmg",
+            "--volname", "Jumperless",
+            "--window-size", "600", "400",
+            "--icon-size", "100",
+            dmg_name,
+            str(temp_dir)
+        ]
+        
+        subprocess.run(cmd, check=True)
+        print(f"DMG created: {dmg_name}")
+        
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: DMG creation failed: {e}")
+    finally:
+        # Clean up temp directory
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
 
 def create_platform_readme(platform_dir, platform):
     """Create main README for platform"""
@@ -487,12 +470,7 @@ def main():
     output_dir.mkdir(exist_ok=True)
     
     # Platform-specific packaging
-    if args.platform == "linux":
-        package_linux(args.arch, output_dir)
-    elif args.platform == "macos":
-        package_macos(args.arch, output_dir)
-    elif args.platform == "windows":
-        package_windows(args.arch, output_dir)
+    package_platform(args.platform, args.arch, output_dir)
     
     # Create archives
     create_archives(args.platform, output_dir)
