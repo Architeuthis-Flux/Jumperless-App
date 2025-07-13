@@ -1,0 +1,38 @@
+# JumperlessAppPackager.py Requirements
+# Platform-aware packaging dependencies
+
+# Core cross-platform packages
+altgraph
+beautifulsoup4
+certifi
+charset-normalizer
+colorama
+idna
+packaging
+psutil
+pyduinocli
+pyinstaller
+pyinstaller-hooks-contrib
+pynput
+pyserial
+requests
+setuptools
+six
+soupsieve
+termcolor
+typing_extensions
+urllib3
+
+# Fix for PyInstaller libpython3.10.so issue
+backports-datetime-fromisoformat
+
+# macOS-specific packages (only install on macOS)
+macholib; sys_platform == "darwin"
+pyobjc-core; sys_platform == "darwin"
+pyobjc-framework-ApplicationServices; sys_platform == "darwin"
+pyobjc-framework-Cocoa; sys_platform == "darwin"
+pyobjc-framework-CoreText; sys_platform == "darwin"
+pyobjc-framework-Quartz; sys_platform == "darwin"
+
+# Windows-specific packages
+pywin32>=306; sys_platform == "win32"

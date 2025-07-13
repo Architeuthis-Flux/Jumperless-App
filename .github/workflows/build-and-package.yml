@@ -1,0 +1,256 @@
+name: Build and Package Jumperless App
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.11"
+  
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            artifact-name: "Jumperless-Linux-x64"
+            executable-name: "JumperlessWokwiBridge"
+            icon-path: "assets/icons/icon.png"
+            
+          # macOS builds (Intel)
+          - os: macos-13
+            platform: macos
+            arch: x64
+            artifact-name: "Jumperless-macOS-Intel"
+            executable-name: "JumperlessWokwiBridge"
+            icon-path: "assets/icons/icon.icns"
+            
+          # macOS builds (Apple Silicon)
+          - os: macos-latest
+            platform: macos
+            arch: arm64
+            artifact-name: "Jumperless-macOS-Apple-Silicon"
+            executable-name: "JumperlessWokwiBridge"
+            icon-path: "assets/icons/icon.icns"
+            
+          # Windows builds
+          - os: windows-latest
+            platform: windows
+            arch: x64
+            artifact-name: "Jumperless-Windows-x64"
+            executable-name: "JumperlessWokwiBridge"
+            icon-path: "assets/icons/icon.ico"
+
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        architecture: ${{ matrix.arch }}
+        
+    - name: Cache pip dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/pip
+          ~/.cache/uv
+        key: ${{ runner.os }}-${{ matrix.arch }}-pip-${{ hashFiles('**/requirements.txt', '**/packagerRequirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ matrix.arch }}-pip-
+          
+    - name: Install uv (modern fast Python package manager)
+      run: |
+        python -m pip install --upgrade pip uv
+        
+    - name: Install system dependencies (Linux)
+      if: matrix.platform == 'linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libfuse2 desktop-file-utils
+        
+    - name: Install system dependencies (macOS)
+      if: matrix.platform == 'macos'
+      run: |
+        brew install create-dmg
+        
+    - name: Install Python dependencies
+      run: |
+        uv pip install --system -r PackagingApps/packagerRequirements.txt
+        uv pip install --system -r requirements.txt
+        
+    - name: Verify PyInstaller installation
+      run: |
+        python -m PyInstaller --version
+        
+    - name: Create version info file (Windows)
+      if: matrix.platform == 'windows'
+      run: |
+        python -c "
+        import sys
+        sys.path.append('scripts')
+        from create_version_info import create_version_info
+        create_version_info()
+        "
+        
+    - name: Build with PyInstaller (Linux)
+      if: matrix.platform == 'linux'
+      run: |
+        python -m PyInstaller \
+          --clean \
+          --onefile \
+          --console \
+          --name "${{ matrix.executable-name }}" \
+          --icon "${{ matrix.icon-path }}" \
+          --distpath "dist/linux" \
+          --workpath "build/linux" \
+          --specpath "build/linux" \
+          --add-data "assets:assets" \
+          JumperlessWokwiBridge.py
+          
+    - name: Build with PyInstaller (macOS)
+      if: matrix.platform == 'macos'
+      run: |
+        python -m PyInstaller \
+          --clean \
+          --onefile \
+          --console \
+          --name "${{ matrix.executable-name }}" \
+          --icon "${{ matrix.icon-path }}" \
+          --distpath "dist/macos" \
+          --workpath "build/macos" \
+          --specpath "build/macos" \
+          --add-data "assets:assets" \
+          JumperlessWokwiBridge.py
+          
+    - name: Build with PyInstaller (Windows)
+      if: matrix.platform == 'windows'
+      run: |
+        python -m PyInstaller \
+          --clean \
+          --onefile \
+          --console \
+          --name "${{ matrix.executable-name }}" \
+          --icon "${{ matrix.icon-path }}" \
+          --distpath "dist/windows" \
+          --workpath "build/windows" \
+          --specpath "build/windows" \
+          --add-data "assets;assets" \
+          --version-file "version_info.txt" \
+          JumperlessWokwiBridge.py
+          
+    - name: Create platform-specific package (Linux)
+      if: matrix.platform == 'linux'
+      run: |
+        python scripts/package_app.py --platform linux --arch ${{ matrix.arch }}
+        
+    - name: Create platform-specific package (macOS)
+      if: matrix.platform == 'macos'
+      run: |
+        python scripts/package_app.py --platform macos --arch ${{ matrix.arch }}
+        
+    - name: Create platform-specific package (Windows)
+      if: matrix.platform == 'windows'
+      run: |
+        python scripts/package_app.py --platform windows --arch ${{ matrix.arch }}
+        
+    - name: Run basic smoke test
+      run: |
+        python scripts/smoke_test.py --platform ${{ matrix.platform }}
+        
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact-name }}
+        path: |
+          builds/${{ matrix.platform }}/
+          !builds/**/*.pyc
+          !builds/**/__pycache__/
+        retention-days: 90
+        compression-level: 6
+        
+    - name: Upload to release (if tag)
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          builds/${{ matrix.platform }}/*
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Job to create a combined release with all platforms
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts/
+        
+    - name: Create combined release package
+      run: |
+        mkdir -p combined-release
+        cp -r artifacts/* combined-release/
+        
+        # Create combined README
+        python scripts/create_combined_readme.py
+        
+    - name: Upload combined release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: combined-release/**/*
+        name: "Jumperless ${{ github.ref_name }}"
+        body: |
+          ## Jumperless ${{ github.ref_name }}
+          
+          Multi-platform release of the Jumperless Wokwi Bridge application.
+          
+          ### Downloads
+          - **Linux x64**: Jumperless-Linux-x64 (AppImage + Python fallback)
+          - **macOS Intel**: Jumperless-macOS-Intel (DMG + Python fallback)
+          - **macOS Apple Silicon**: Jumperless-macOS-Apple-Silicon (DMG + Python fallback)
+          - **Windows x64**: Jumperless-Windows-x64 (EXE + Python fallback)
+          
+          ### Installation Methods
+          Each package includes multiple ways to run Jumperless:
+          1. **Native executable** - Double-click to run, no dependencies
+          2. **Python script** - Run from source with Python 3.11+
+          3. **Portable launcher** - Cross-platform launcher script
+          
+          ### Quick Start
+          1. Download the package for your platform
+          2. Extract/install the package
+          3. Run the native executable OR use the Python fallback
+          
+          See the README.md in each package for detailed instructions.
+          
+          ### What's New
+          - Multi-platform CI/CD pipeline
+          - Improved packaging with modern tools
+          - Better error handling and logging
+          - Enhanced platform-specific optimizations
+          
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 

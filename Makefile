@@ -56,7 +56,7 @@ $(PACKAGER_CONSTRAINTS): $(PACKAGER_REQUIREMENTS)
 # Target to build the application
 # Dependencies: env and constraints
 package: packager_env
-	$(PACKAGER_PYTHON) Packager/JumperlessAppPackager.py
+	$(PACKAGER_PYTHON) Packager/JumperlessAppPackagerLinux.py
 
 # Target to clean up build artifacts
 clean:
