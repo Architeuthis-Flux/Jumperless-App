@@ -207,17 +207,40 @@ jobs:
           exit 0
         fi
         
+        # Validate all required secrets are present
+        if [ -z "$APPLE_ID_PASSWORD" ]; then
+          echo "ERROR: APPLE_ID_PASSWORD secret is not set"
+          exit 1
+        fi
+        
+        if [ -z "$APPLE_TEAM_ID" ]; then
+          echo "ERROR: APPLE_TEAM_ID secret is not set"
+          exit 1
+        fi
+        
+        # Basic validation of Team ID format (should be 10 characters)
+        if [ ${#APPLE_TEAM_ID} -ne 10 ]; then
+          echo "ERROR: APPLE_TEAM_ID should be exactly 10 characters, got: ${#APPLE_TEAM_ID}"
+          exit 1
+        fi
+        
         APP_PATH="dist/macos/Jumperless.app"
         if [ -d "$APP_PATH" ]; then
           echo "Creating archive for notarization"
           ditto -c -k --keepParent "$APP_PATH" "Jumperless.zip"
           
-          echo "Submitting for notarization"
-          xcrun notarytool submit "Jumperless.zip" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
+                  echo "Submitting for notarization"
+        echo "================================"
+        echo "Apple ID: $APPLE_ID"
+        echo "Team ID: $APPLE_TEAM_ID"
+        echo "Password length: ${#APPLE_ID_PASSWORD} characters"
+        echo "================================"
+        
+        xcrun notarytool submit "Jumperless.zip" \
+          --apple-id "$APPLE_ID" \
+          --password "$APPLE_ID_PASSWORD" \
+          --team-id "$APPLE_TEAM_ID" \
+          --wait
           
           echo "Stapling notarization"
           xcrun stapler staple "$APP_PATH"
