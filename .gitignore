@@ -218,5 +218,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-
+firmware.uf2
+jumperless
+JumperlessDMG/*
 builds/macos/*
+JumperlessDMG/Jumperless.app/Contents/Frameworks/base_library.zip

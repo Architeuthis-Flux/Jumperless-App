@@ -5,13 +5,14 @@ import platform
 import shutil
 import time
 import subprocess
+import tarfile
 
-# macOS packaging paths
-generated_app_path = pathlib.Path("/Users/kevinsanto/Documents/GitHub/JumperlessV5/JumperlessWokwiBridge/dist/Jumperless.app/Contents/MacOS/Jumperless")
-generated_app_path_renamed = pathlib.Path("/Users/kevinsanto/Documents/GitHub/JumperlessV5/JumperlessWokwiBridge/dist/Jumperless.app/Contents/MacOS/Jumperless_cli")
-target_app_path = pathlib.Path("/Users/kevinsanto/Documents/GitHub/JumperlessV5/JumperlessWokwiBridge/dist/Jumperless.app/Contents/MacOS/")
-icon_path = pathlib.Path("icon.icns")
-nonexec_launcher_path = pathlib.Path("jumperless_cli_launcher.sh")
+# macOS packaging paths - Updated to use relative paths
+generated_app_path = pathlib.Path("dist/Jumperless.app/Contents/MacOS/Jumperless")
+generated_app_path_renamed = pathlib.Path("dist/Jumperless.app/Contents/MacOS/Jumperless_cli")
+target_app_path = pathlib.Path("dist/Jumperless.app/Contents/MacOS/")
+icon_path = pathlib.Path("assets/icons/icon.icns")
+nonexec_launcher_path = pathlib.Path("Scripts/jumperless_cli_launcher.sh")
 launcher_path = pathlib.Path("Jumperless")
 app_path = pathlib.Path("Jumperless.app")
 apple_silicon_folder = pathlib.Path("apple silicon/Jumperless.app")
@@ -32,10 +33,19 @@ windows_installer_dir = pathlib.Path("JumperlessWindows")
 windows_exe_path = pathlib.Path("Jumperless-Windows-x64.exe")
 windows_zip_path = pathlib.Path("Jumperless-Windows-x64.zip")
 
-# Common paths
+# Common paths - Updated to use relative paths
 appdist_path = pathlib.Path("dist/Jumperless.app")
 dmg_folder = pathlib.Path("JumperlessDMG/Jumperless.app")
 python_folder = pathlib.Path("Jumperless Python/")
+
+# Get the current working directory where the script is running
+current_path = pathlib.Path.cwd()
+script_path = pathlib.Path(__file__).parent.resolve()
+
+print(f"Current working directory: {current_path}")
+print(f"Script directory: {script_path}")
+
+
 
 def check_and_update_requirements():
     """Generate new requirements.txt and update new_requirements flag if they differ"""
@@ -49,6 +59,9 @@ def check_and_update_requirements():
             'pyserial',        # For serial communication (imported as 'serial')
             'psutil',          # For system/process monitoring
             'beautifulsoup4',  # For HTML parsing (imported as 'bs4')
+            'termios',
+            'tty',
+            'select',
             # 'pynput',         # For keyboard and mouse input (optional but recommended)
             # 'pywin32',         # For Windows volume detection and APIs
             # 'pyduinocli',      # For Arduino CLI support (optional but recommended)
@@ -229,18 +242,35 @@ def package_macos():
     """Package for macOS"""
     print("=== Packaging for macOS ===")
     
-    os.system(f"python3 -m PyInstaller --icon=\"/Users/kevinsanto/Documents/GitHub/JumperlessV5/jumperlesswokwibridge/icon.icns\" \
-    -y \
-    --console \
-    --windowed \
-    --path \"/Users/kevinsanto/Documents/GitHub/JumperlessV5/JumperlessWokwiBridge/.venv/lib/python3.13/site-packages\" \
-    JumperlessWokwiBridge.py \
-    --name Jumperless ")
+    # Get the absolute path to the icon for PyInstaller
+    icon_abs_path = (current_path / icon_path).resolve()
+    
+    # Check if icon exists
+    if not icon_abs_path.exists():
+        print(f"Warning: Icon file not found at {icon_abs_path}")
+        print("PyInstaller will proceed without icon")
+        icon_arg = ""
+    else:
+        icon_arg = f'--icon="{icon_abs_path}"'
+        print(f"Using icon: {icon_abs_path}")
+    
+    pyinstaller_cmd = f"python3 -m PyInstaller {icon_arg} -y --console --windowed JumperlessWokwiBridge.py --name Jumperless"
+    
+    print(f"Running PyInstaller command: {pyinstaller_cmd}")
+    result = os.system(pyinstaller_cmd)
+    
+    if result != 0:
+        print("❌ PyInstaller failed!")
+        return False
 
     time.sleep(4)
 
     # Prepare launcher script
     print("Setting up launcher script...")
+    if not nonexec_launcher_path.exists():
+        print(f"❌ Launcher script not found at {nonexec_launcher_path}")
+        return False
+        
     os.system(f"chmod 755 {nonexec_launcher_path}")
     print("Changed permissions for " + str(nonexec_launcher_path) + '\n')
 
@@ -249,47 +279,241 @@ def package_macos():
     print("Copied launcher script to " + str(launcher_path) + '\n')
 
     print("Renaming main app to Jumperless_cli...")
+    if not generated_app_path.exists():
+        print(f"❌ Generated app not found at {generated_app_path}")
+        print("PyInstaller may have failed or used a different output location")
+        print("Checking dist directory contents:")
+        dist_dir = current_path / "dist"
+        if dist_dir.exists():
+            for item in dist_dir.iterdir():
+                print(f"  - {item}")
+        return False
+        
     os.rename(generated_app_path, generated_app_path_renamed)
     print("Renamed " + str(generated_app_path) + " to " + str(generated_app_path_renamed) + '\n')
 
     print("Installing launcher into app bundle...")
+    if not target_app_path.exists():
+        print(f"❌ Target app path not found at {target_app_path}")
+        return False
     os.system(f"cp {launcher_path} {target_app_path}")
     print("Copied " + str(launcher_path) + " to " + str(target_app_path) + '\n')
 
     print("Copying app to DMG folder...")
+    if not appdist_path.exists():
+        print(f"❌ App dist path not found at {appdist_path}")
+        return False
+    
+    # Create DMG folder if it doesn't exist
+    dmg_folder.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(appdist_path, dmg_folder, dirs_exist_ok=True)
     print("Copied " + str(app_path) + " to " + str(dmg_folder) + '\n')
 
     print("Updating Python files in DMG...")
-    # Delete existing Python files to ensure fresh copies
-    python_bridge_file = python_folder / "JumperlessWokwiBridge.py"
-    python_requirements_file = python_folder / "requirements.txt"
-    python_launcher_file = python_folder / "jumperless_launcher.sh"
+    # Create Python folder if it doesn't exist
+    python_folder.mkdir(parents=True, exist_ok=True)
     
-    if python_bridge_file.exists():
-        os.remove(python_bridge_file)
-        print("Deleted old JumperlessWokwiBridge.py")
+    # Clear existing Python folder contents
+    if python_folder.exists():
+        shutil.rmtree(python_folder)
+        print("Cleared existing Python folder contents")
+    python_folder.mkdir(parents=True, exist_ok=True)
     
-    if python_requirements_file.exists():
-        os.remove(python_requirements_file)
-        print("Deleted old requirements.txt")
+    # Look for Python launcher tar.gz file
+    python_launcher_archives = [
+        current_path / "Jumperless_python_launcher.tar.gz",
+        current_path / "Jumperless_Python_Launcher_macOS.tar.gz",
+        current_path / "Jumperless_Python_Launcher.tar.gz"
+    ]
     
-    if python_launcher_file.exists():
-        os.remove(python_launcher_file)
-        print("Deleted old launcher script")
+    archive_found = False
+    for archive_path in python_launcher_archives:
+        if archive_path.exists():
+            print(f"Found Python launcher archive: {archive_path}")
+            try:
+                with tarfile.open(archive_path, 'r:gz') as tar:
+                    # Safety check: ensure all members are safe to extract
+                    def is_within_directory(directory, target):
+                        abs_directory = os.path.abspath(directory)
+                        abs_target = os.path.abspath(target)
+                        prefix = os.path.commonpath([abs_directory, abs_target])
+                        return prefix == abs_directory
+                    
+                    def safe_extract(tar, path=".", members=None, *, numeric_owner=False):
+                        for member in tar.getmembers():
+                            member_path = os.path.join(path, member.name)
+                            if not is_within_directory(path, member_path):
+                                raise Exception(f"Attempted path traversal in tar file: {member.name}")
+                        tar.extractall(path, members, numeric_owner=numeric_owner)
+                    
+                    # Extract safely to a temporary directory first
+                    temp_extract_dir = python_folder / "temp_extract"
+                    temp_extract_dir.mkdir(exist_ok=True)
+                    safe_extract(tar, temp_extract_dir)
+                    
+                    # Find the extracted directory and move its contents up one level
+                    extracted_items = list(temp_extract_dir.iterdir())
+                    
+                    # Find the main content directory (ignore resource fork files starting with ._)
+                    content_dirs = [item for item in extracted_items if item.is_dir() and not item.name.startswith('._')]
+                    
+                    if len(content_dirs) == 1:
+                        # Single content directory found - move its contents to python_folder
+                        source_dir = content_dirs[0]
+                        print(f"Flattening directory structure from {source_dir.name}")
+                        for item in source_dir.iterdir():
+                            # Skip resource fork files
+                            if item.name.startswith('._'):
+                                continue
+                                
+                            dest_path = python_folder / item.name
+                            try:
+                                if item.is_dir():
+                                    shutil.move(str(item), str(dest_path))
+                                else:
+                                    shutil.move(str(item), str(dest_path))
+                                print(f"Moved: {item.name}")
+                            except Exception as e:
+                                print(f"Warning: Could not move {item.name}: {e}")
+                                # Try copying instead
+                                try:
+                                    if item.is_dir():
+                                        shutil.copytree(item, dest_path, dirs_exist_ok=True)
+                                    else:
+                                        shutil.copy2(item, dest_path)
+                                    print(f"Copied: {item.name}")
+                                except Exception as e2:
+                                    print(f"Error copying {item.name}: {e2}")
+                    else:
+                        # Multiple content directories or no clear main directory - move all non-resource-fork items
+                        print("Moving all extracted contents to Python folder")
+                        for item in extracted_items:
+                            # Skip resource fork files
+                            if item.name.startswith('._'):
+                                continue
+                                
+                            dest_path = python_folder / item.name
+                            try:
+                                if item.is_dir():
+                                    shutil.move(str(item), str(dest_path))
+                                else:
+                                    shutil.move(str(item), str(dest_path))
+                                print(f"Moved: {item.name}")
+                            except Exception as e:
+                                print(f"Warning: Could not move {item.name}: {e}")
+                                # Try copying instead
+                                try:
+                                    if item.is_dir():
+                                        shutil.copytree(item, dest_path, dirs_exist_ok=True)
+                                    else:
+                                        shutil.copy2(item, dest_path)
+                                    print(f"Copied: {item.name}")
+                                except Exception as e2:
+                                    print(f"Error copying {item.name}: {e2}")
+                    
+                    # Clean up temporary directory
+                    try:
+                        shutil.rmtree(temp_extract_dir)
+                    except Exception as e:
+                        print(f"Warning: Could not clean up temp directory: {e}")
+                    
+                    # Make any .sh files executable in the final location
+                    for root, dirs, files in os.walk(python_folder):
+                        for file in files:
+                            if file.endswith('.sh'):
+                                file_path = pathlib.Path(root) / file
+                                try:
+                                    os.chmod(file_path, 0o755)
+                                    rel_path = file_path.relative_to(current_path)
+                                    print(f"Made executable: {rel_path}")
+                                except Exception as e:
+                                    print(f"Warning: Could not make {file} executable: {e}")
+                    
+                print(f"✅ Extracted Python launcher contents from {archive_path.name}")
+                archive_found = True
+                break
+            except Exception as e:
+                print(f"❌ Error extracting {archive_path.name}: {e}")
+                continue
     
-    # Copy latest files
-    shutil.copy2("JumperlessWokwiBridge.py", python_folder)
-    shutil.copy2("requirements.txt", python_folder)
-    shutil.copy2("jumperless_launcher.sh", python_folder)
-    os.chmod(python_folder / "jumperless_launcher.sh", 0o755)
+    if not archive_found:
+        print("⚠️  No Python launcher archive found, falling back to manual file copying...")
+        
+        # Fallback: Copy individual files manually
+        main_script = current_path / "JumperlessWokwiBridge.py"
+        requirements_file = current_path / "requirements.txt"
+        launcher_script = current_path / "Scripts" / "jumperless_launcher.sh"
+        
+        if main_script.exists():
+            shutil.copy2(main_script, python_folder)
+            print("Copied JumperlessWokwiBridge.py")
+        else:
+            print("⚠️  JumperlessWokwiBridge.py not found in current directory")
+        
+        if requirements_file.exists():
+            shutil.copy2(requirements_file, python_folder)
+            print("Copied requirements.txt")
+        else:
+            print("⚠️  requirements.txt not found in current directory")
+        
+        if launcher_script.exists():
+            shutil.copy2(launcher_script, python_folder)
+            os.chmod(python_folder / "jumperless_launcher.sh", 0o755)
+            print("Copied and made executable jumperless_launcher.sh")
+        else:
+            print("⚠️  jumperless_launcher.sh not found in Scripts directory")
     
-    print("Copied latest Python files and macOS launcher to " + str(python_folder) + '\n')
+    print("Updated Python files in " + str(python_folder) + '\n')
 
     print("Creating DMG installer...")
-    os.system(f"rm -f Jumperless_Installer.dmg")
-    os.chmod("createDMG.sh", 0o755)
-    os.system("./createDMG.sh")
+    
+    # Copy necessary files for DMG creation to current directory temporarily
+    temp_icon_path = current_path / "icon.icns"
+    temp_background_path = current_path / "JumperlessWokwiDMGwindow4x.png"
+    
+    # Copy icon file
+    if icon_abs_path.exists():
+        shutil.copy2(icon_abs_path, temp_icon_path)
+        print(f"Copied icon for DMG creation: {temp_icon_path}")
+    
+    # Copy background image if it exists
+    background_source = current_path / "JumperlessWokwiDMGwindow4x.png"
+    if background_source.exists():
+        # Background is already in the right place
+        print(f"DMG background image found: {background_source}")
+    else:
+        # Look for it in assets directory
+        background_assets = current_path / "assets" / "JumperlessWokwiDMGwindow4x.png"
+        if background_assets.exists():
+            shutil.copy2(background_assets, temp_background_path)
+            print(f"Copied background for DMG creation: {temp_background_path}")
+        else:
+            print("Warning: DMG background image not found")
+    
+    # Remove old DMG if it exists
+    os.system("rm -f Jumperless_installer_macOS.dmg")
+    
+    # Make createDMG.sh executable and run it
+    createDMG_script = current_path / "Scripts" / "createDMG.sh"
+    if createDMG_script.exists():
+        os.chmod(createDMG_script, 0o755)
+        result = os.system(f"cd '{current_path}' && '{createDMG_script}'")
+        
+        # Clean up temporary files
+        if temp_icon_path.exists() and temp_icon_path != icon_abs_path:
+            os.remove(temp_icon_path)
+            print("Cleaned up temporary icon file")
+        
+        if result == 0:
+            print("✅ DMG created successfully!")
+        else:
+            print("⚠️  DMG creation may have failed")
+    else:
+        print(f"❌ createDMG.sh script not found at {createDMG_script}")
+        print("Skipping DMG creation")
+    
+    print("✅ macOS packaging completed!")
+    return True
 
 def create_appimage_for_arch(arch_name, dist_path, appdir_path, appimage_path, executable_name):
     """Helper function to create AppImage for a specific architecture"""
@@ -379,28 +603,46 @@ exec "$HERE/jumperless_cli_launcher.sh" "$@"
     os.chmod(apprun_path, 0o755)
     
     # Copy launcher script
-    launcher_source = "jumperless_cli_launcher.sh"
-    if os.path.exists(launcher_source):
+    launcher_source = current_path / "Scripts" / "jumperless_cli_launcher.sh"
+    if launcher_source.exists():
         shutil.copy2(launcher_source, appdir_path / "jumperless_cli_launcher.sh")
         os.chmod(appdir_path / "jumperless_cli_launcher.sh", 0o755)
+        print(f"Copied launcher script from {launcher_source}")
     else:
         print(f"Warning: {launcher_source} not found for AppImage")
     
     # Copy icon (convert to PNG if needed)
-    if os.path.exists("icon.png"):
-        shutil.copy2("icon.png", appdir_path / "jumperless.png")
-    elif os.path.exists("icon.icns"):
+    icon_png_path = current_path / "assets" / "icons" / "icon.png"
+    icon_icns_path = current_path / icon_path
+    
+    if icon_png_path.exists():
+        shutil.copy2(icon_png_path, appdir_path / "jumperless.png")
+        print(f"Copied PNG icon from {icon_png_path}")
+    elif icon_icns_path.exists():
         # Try to convert icns to png using sips (macOS) or ImageMagick
         try:
-            os.system(f"sips -s format png icon.icns --out {appdir_path}/jumperless.png")
+            result = os.system(f"sips -s format png '{icon_icns_path}' --out '{appdir_path}/jumperless.png'")
+            if result == 0:
+                print(f"Converted ICNS icon from {icon_icns_path}")
+            else:
+                raise Exception("sips conversion failed")
         except:
             try:
-                os.system(f"convert icon.icns {appdir_path}/jumperless.png")
+                result = os.system(f"convert '{icon_icns_path}' '{appdir_path}/jumperless.png'")
+                if result == 0:
+                    print(f"Converted ICNS icon using ImageMagick from {icon_icns_path}")
+                else:
+                    raise Exception("ImageMagick conversion failed")
             except:
                 print("Warning: Could not convert icon. Creating placeholder.")
                 # Create a simple placeholder icon
                 with open(appdir_path / "jumperless.png", "w", encoding='utf-8') as f:
                     f.write("")  # Placeholder
+    else:
+        print(f"Warning: No icon found at {icon_png_path} or {icon_icns_path}. Creating placeholder.")
+        # Create a simple placeholder icon
+        with open(appdir_path / "jumperless.png", "w", encoding='utf-8') as f:
+            f.write("")  # Placeholder
     
     return True
 
@@ -814,11 +1056,11 @@ if __name__ == "__main__":
 ## Launcher Options
 Multiple launcher options are provided for different use cases:
 
-### Option 1: Batch Launchers (Recommended for most users)
+### Option 1: Batch Launchers
 - `jumperless_launcher.bat` - Full-featured batch launcher
 - `jumperless_launcher.cmd` - Alternative batch launcher (same functionality)
 
-### Option 2: Python Wrapper (For advanced users)
+### Option 2: Python Wrapper
 - `jumperless_launcher.py` - Cross-platform Python launcher
 
 ### Option 3: Manual Execution
@@ -850,10 +1092,10 @@ If the launcher doesn't work, you can run manually:
 
 ## Files Included
 - `JumperlessWokwiBridge.py` - Main application
-- `requirements.txt` - Python dependencies
-- `jumperless_launcher.bat` - Windows batch launcher
-- `jumperless_launcher.cmd` - Alternative batch launcher
-- `jumperless_launcher.py` - Python wrapper launcher
+- `requirements.txt`         - Python dependencies
+- `jumperless_launcher.bat`  - Windows batch launcher
+- `jumperless_launcher.cmd`  - Alternative batch launcher
+- `jumperless_launcher.py`   - Python wrapper launcher
 - `README.md` - This file
 
 ## Compatibility
@@ -941,8 +1183,8 @@ def package_python_macos():
     print("=== Packaging Python Source for macOS ===")
     
     # macOS distribution folder
-    macos_folder = pathlib.Path("Jumperless_macOS")
-    tar_name = "Jumperless_macOS.tar.gz"
+    macos_folder = pathlib.Path("Jumperless_Python_Launcher_macOS")
+    tar_name = "Jumperless_Python_Launcher_macOS.tar.gz"
     
     # Clean up existing folder
     if macos_folder.exists():
@@ -1139,11 +1381,11 @@ exec $PYTHON_CMD JumperlessWokwiBridge.py "$@"
 ## Launcher Options
 Multiple launcher options are provided for different use cases:
 
-### Option 1: Shell Script Launchers (Recommended for most users)
+### Option 1: Shell Script Launchers
 - `jumperless_launcher.sh` - Full-featured shell launcher
 - `jumperless_launcher` - Executable launcher (no extension) for double-clicking
 
-### Option 2: Python Wrapper (For advanced users)
+### Option 2: Python Wrapper
 - `jumperless_launcher.py` - Cross-platform Python launcher
 
 ### Option 3: Manual Execution
@@ -1168,7 +1410,7 @@ Download from python.org (recommended for beginners)
 brew install python3
 ```
 
-### Option 3: System Python (macOS 12.3+)
+### Option 3: System Python
 Recent macOS versions include Python 3
 
 ## Manual Installation
@@ -1476,11 +1718,11 @@ exec $PYTHON_CMD JumperlessWokwiBridge.py "$@"
 ## Launcher Options
 Multiple launcher options are provided for different use cases:
 
-### Option 1: Shell Script Launchers (Recommended for most users)
+### Option 1: Shell Script Launchers
 - `jumperless_launcher.sh` - Full-featured shell launcher
 - `jumperless_launcher` - Executable launcher (no extension) for double-clicking
 
-### Option 2: Python Wrapper (For advanced users)
+### Option 2: Python Wrapper
 - `jumperless_launcher.py` - Cross-platform Python launcher
 
 ### Option 3: Manual Execution

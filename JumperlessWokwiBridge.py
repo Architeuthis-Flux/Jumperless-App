@@ -4,7 +4,7 @@
 # KevinC@ppucc.io
 #
 
-App_Version = "1.1.1.9"
+App_Version = "1.1.1.11"
 new_requirements = True
 
 
@@ -811,7 +811,7 @@ def find_main_port(jumperless_ports, force_quit_python=False):
                     start_time = time.time()
                     
                     # Read all available data with longer timeout
-                    while time.time() - start_time < 1.3:
+                    while time.time() - start_time < 2.0:
                         if test_port.in_waiting > 0:
                             response_buffer += test_port.read(test_port.in_waiting)
                             time.sleep(0.1)  # Small delay to catch additional data
@@ -869,7 +869,7 @@ def query_port_function(port_name):
             response_buffer = b''
             start_time = time.time()
             
-            while time.time() - start_time < 0.8:
+            while time.time() - start_time < 1.0:
                 if port.in_waiting > 0:
                     response_buffer += port.read(port.in_waiting)
                     time.sleep(0.01)
@@ -1034,6 +1034,18 @@ def choose_arduino_port(organized_ports, main_port_name):
     
     return None
 
+def display_ports_with_selection(ports):
+    """Display ports in a clear, numbered list with yellow numbers"""
+    safe_print("\nAvailable serial ports:", Fore.CYAN)
+    
+    for i, (port, desc, hwid, interface, additional_attrs) in enumerate(ports, 1):
+        vid, pid = parse_hardware_id(hwid, desc)
+        
+        if is_jumperless_device(desc, pid, interface):
+            safe_print(f"{Fore.YELLOW}{i}{Fore.MAGENTA}: {port} [{desc}]")
+        else:
+            safe_print(f"{Fore.YELLOW}{i}{Fore.BLUE}: {port} [{desc}]")
+
 def open_serial():
     """Open serial connection with simplified port detection"""
     global portName, ser, arduinoPort, serialconnected, portSelected, updateInProgress
@@ -1050,33 +1062,73 @@ def open_serial():
             time.sleep(2)
             continue
         
+        # Sort ports alphabetically by port name
+        ports = sorted(ports, key=lambda x: x[0])
+        
+        # Display all ports with numbered selection
+        display_ports_with_selection(ports)
+        
         # Find all Jumperless devices
         jumperless_ports = []
         other_ports = []
         
-        for i, (port, desc, hwid, interface, additional_attrs) in enumerate(ports, 1):
+        for port, desc, hwid, interface, additional_attrs in ports:
             vid, pid = parse_hardware_id(hwid, desc)
             
             if is_jumperless_device(desc, pid, interface):
                 jumperless_ports.append((port, desc, hwid, interface, additional_attrs))
-                safe_print(f"{i}: {port} [{desc}]", Fore.MAGENTA)
             else:
                 other_ports.append((port, desc, hwid, interface, additional_attrs))
-                safe_print(f"{i}: {port} [{desc}]", Fore.BLUE)
         
         if not jumperless_ports:
             safe_print("No Jumperless devices found.", Fore.YELLOW)
-            selection = input("Enter port number manually or 'r' to rescan: ").strip()
+            # safe_print("\nPlease manually select a port from the list above.", Fore.CYAN)
+            
+            # Add port options to command history for easy selection
+            original_history_length = 0
+            if READLINE_AVAILABLE:
+                try:
+                    # Record original history length before adding entries
+                    original_history_length = readline.get_current_history_length()
+                    
+                    for i, (port, desc, hwid, interface, additional_attrs) in enumerate(ports, 1):
+                        # Add number with port description
+                        desc_entry = f"{i}: {port} [{desc}]"
+                        readline.add_history(desc_entry)
+                except Exception:
+                    pass
+            
+            selection = input(f"Enter port number {Fore.YELLOW}(1-{len(ports)}){Fore.RESET} or 'r' to rescan: ").strip()
+            
+            # Remove added history entries by truncating back to original length
+            if READLINE_AVAILABLE and original_history_length >= 0:
+                try:
+                    current_length = readline.get_current_history_length()
+                    # Remove all entries added after the original length
+                    while current_length > original_history_length:
+                        readline.remove_history_item(current_length - 1)
+                        current_length -= 1
+                except Exception:
+                    pass
+            
             if selection.lower() == 'r':
                 continue
             
             try:
-                port_idx = int(selection) - 1
+                # Handle both plain numbers and "number: port [desc]" format
+                if ':' in selection:
+                    # Extract number from "1: /dev/ttyUSB0 [desc]" format
+                    selection_num = selection.split(':')[0].strip()
+                else:
+                    selection_num = selection
+                
+                port_idx = int(selection_num) - 1
                 if 0 <= port_idx < len(ports):
                     portName = ports[port_idx][0]
                     portSelected = True
+                    safe_print(f"Selected port: {portName}", Fore.GREEN)
             except (ValueError, IndexError):
-                safe_print("Invalid selection.", Fore.RED)
+                safe_print("Invalid selection. Please try again.", Fore.RED)
                 continue
         else:
             # Step 1: Find the main port using '?' query
@@ -1094,13 +1146,52 @@ def open_serial():
             
             if not main_port_name:
                 safe_print("Could not find main port automatically.", Fore.YELLOW)
+                safe_print("Make sure you don't have this app running in another window.", Fore.RED)
+                # Re-display ports for manual selection
+                display_ports_with_selection(ports)
+                
                 # Manual selection fallback
+                safe_print("\nPlease manually select a port from the list above.", Fore.CYAN)
+                
+                # Add port options to command history for easy selection
+                original_history_length = 0
+                if READLINE_AVAILABLE:
+                    try:
+                        # Record original history length before adding entries
+                        original_history_length = readline.get_current_history_length()
+                        
+                        for i, (port, desc, hwid, interface, additional_attrs) in enumerate(ports, 1):
+                            # Add number with port description
+                            desc_entry = f"{i}: {port} [{desc}]"
+                            readline.add_history(desc_entry)
+                    except Exception:
+                        pass
+                
                 try:
-                    selection = input("\nSelect port number ('r' to rescan): ").strip()
+                    selection = input(f"Enter port number {Fore.YELLOW}(1-{len(ports)}){Fore.RESET} or 'r' to rescan: ").strip()
+                    
+                    # Remove added history entries by truncating back to original length
+                    if READLINE_AVAILABLE and original_history_length >= 0:
+                        try:
+                            current_length = readline.get_current_history_length()
+                            # Remove all entries added after the original length
+                            while current_length > original_history_length:
+                                readline.remove_history_item(current_length - 1)
+                                current_length -= 1
+                        except Exception:
+                            pass
+                    
                     if selection.lower() == 'r':
                         continue
                     
-                    port_idx = int(selection) - 1
+                    # Handle both plain numbers and "number: port [desc]" format
+                    if ':' in selection:
+                        # Extract number from "1: /dev/ttyUSB0 [desc]" format
+                        selection_num = selection.split(':')[0].strip()
+                    else:
+                        selection_num = selection
+                    
+                    port_idx = int(selection_num) - 1
                     if 0 <= port_idx < len(ports):
                         portName = ports[port_idx][0]
                         portSelected = True
@@ -1322,7 +1413,12 @@ def update_jumperless_firmware(force=False):
                 # Debug information
                 if sys.platform == "win32":
                     safe_print(f"Windows platform detected. WIN32_AVAILABLE: {WIN32_AVAILABLE}", Fore.CYAN)
-                
+                    if jumperlessV5:
+                        safe_print("Looking for drive with name containing 'RP2350'", Fore.CYAN)
+                    else:
+                        safe_print("Looking for drive with name containing 'RPI-RP2'", Fore.CYAN)
+                printedDrives = 0
+                previous_drives = set()
                 while foundVolume == "none":
                     if time.time() - timeStart > 20:
                         safe_print("Timeout waiting for bootloader drive to appear", Fore.RED)
@@ -1331,6 +1427,23 @@ def update_jumperless_firmware(force=False):
                     
                     try:
                         partitions = psutil.disk_partitions()
+                        current_drives = set(p.mountpoint for p in partitions)
+                        
+                        # Show all drives on first iteration
+                        if printedDrives < 1:
+                            safe_print(f"Available drives: ", Fore.YELLOW)
+                            for p in partitions:
+                                safe_print(f"  {p.mountpoint}", Fore.YELLOW)
+                            previous_drives = current_drives.copy()
+                            printedDrives += 1
+                        else:
+                            # Show any new drives that appeared
+                            new_drives = current_drives - previous_drives
+                            if new_drives:
+                                # safe_print(f"New drive(s) detected:", Fore.GREEN)
+                                for drive in sorted(new_drives):
+                                    safe_print(f"  {drive}", Fore.GREEN)
+                                previous_drives = current_drives.copy()
                         
                         for p in partitions:
                             try:
@@ -1338,17 +1451,19 @@ def update_jumperless_firmware(force=False):
                                     try:
                                         volume_info = win32api.GetVolumeInformation(p.mountpoint)
                                         volume_name = volume_info[0]
+                                        safe_print(f"Windows drive {p.mountpoint}: '{volume_name}'", Fore.YELLOW)
                                         if jumperlessV5:
-                                            if volume_name.contains("RP2350"):
+                                            if "RP2350" in volume_name:
                                                 foundVolume = p.mountpoint
                                                 safe_print(f"Found Jumperless V5 at {foundVolume}", Fore.CYAN)
                                                 break
                                         else:
-                                            if volume_name.contains("RPI-RP2"):
+                                            if "RPI-RP2" in volume_name:
                                                 foundVolume = p.mountpoint
                                                 safe_print(f"Found Jumperless at {foundVolume}", Fore.CYAN)
                                                 break
-                                    except Exception:
+                                    except Exception as e:
+                                        safe_print(f"Error reading volume info for {p.mountpoint}: {e}", Fore.YELLOW)
                                         continue
                                 elif sys.platform == "win32" and not WIN32_AVAILABLE:
                                     # Fallback Windows method without win32api
@@ -1357,11 +1472,11 @@ def update_jumperless_firmware(force=False):
                                         mountpoint = p.mountpoint
                                         safe_print(f"Checking Windows drive: {mountpoint}", Fore.YELLOW)
                                         
-                                        # Check if this looks like a RP2040/RP2350 drive by looking for INFO_UF2.TXT
+                                        # Method 1: Check if this looks like a RP2040/RP2350 drive by looking for INFO_UF2.TXT
                                         info_file = os.path.join(mountpoint, "INFO_UF2.TXT")
                                         if os.path.exists(info_file):
                                             try:
-                                                with open(info_file, 'r') as f:
+                                                with open(info_file, 'r', encoding='utf-8', errors='ignore') as f:
                                                     content = f.read()
                                                     safe_print(f"Found INFO_UF2.TXT content: {content[:100]}...", Fore.YELLOW)
                                                     if jumperlessV5:
@@ -1377,26 +1492,48 @@ def update_jumperless_firmware(force=False):
                                             except Exception as e:
                                                 safe_print(f"Error reading INFO_UF2.TXT: {e}", Fore.RED)
                                         
-                                        # Alternative: try using subprocess to get volume label
+                                        # Method 2: Try using subprocess to get volume label
                                         try:
+                                            # Handle both C:\ and C: formats
                                             drive_letter = mountpoint.rstrip('\\').rstrip('/')
+                                            if len(drive_letter) == 2 and drive_letter.endswith(':'):
+                                                drive_letter += '\\'  # vol command needs C:\ format
+                                            
                                             result = subprocess.run(['vol', drive_letter], 
-                                                                  capture_output=True, text=True, timeout=2)
+                                                                  capture_output=True, text=True, timeout=3)
                                             if result.returncode == 0:
                                                 output = result.stdout.strip()
                                                 safe_print(f"Volume info for {drive_letter}: {output}", Fore.YELLOW)
                                                 if jumperlessV5:
-                                                    if "RP2350" in output:
+                                                    if "RP2350" in output.upper():
                                                         foundVolume = mountpoint
                                                         safe_print(f"Found Jumperless V5 at {foundVolume} via vol command", Fore.CYAN)
                                                         break
                                                 else:
-                                                    if "RPI-RP2" in output:
+                                                    if "RPI-RP2" in output.upper():
                                                         foundVolume = mountpoint
                                                         safe_print(f"Found Jumperless at {foundVolume} via vol command", Fore.CYAN)
                                                         break
+                                            else:
+                                                safe_print(f"Vol command failed for {drive_letter}: {result.stderr.strip()}", Fore.YELLOW)
                                         except Exception as e:
-                                            safe_print(f"Error checking volume with subprocess: {e}", Fore.RED)
+                                            safe_print(f"Error checking volume with subprocess: {e}", Fore.YELLOW)
+                                        
+                                        # Method 3: Check for other characteristic RP2040/RP2350 files
+                                        try:
+                                            bootloader_files = ['INDEX.HTM', 'index.htm', 'boot_out.txt']
+                                            for boot_file in bootloader_files:
+                                                file_path = os.path.join(mountpoint, boot_file)
+                                                if os.path.exists(file_path):
+                                                    safe_print(f"Found {boot_file} - likely a Raspberry Pi bootloader drive", Fore.CYAN)
+                                                    foundVolume = mountpoint
+                                                    safe_print(f"Found potential Jumperless drive at {foundVolume} via {boot_file}", Fore.CYAN)
+                                                    break
+                                            if foundVolume != "none":
+                                                break
+                                        except Exception as e:
+                                            safe_print(f"Error checking for bootloader files: {e}", Fore.YELLOW)
+                                            
                                     except Exception as e:
                                         safe_print(f"Error in fallback Windows detection: {e}", Fore.RED)
                                         continue
@@ -1451,21 +1588,23 @@ def update_jumperless_firmware(force=False):
             
             # Fallback to manual instructions if automatic update failed
             if not automatic_update_success:
-                # safe_print("\n" + "="*60, Fore.YELLOW)
-                # safe_print("MANUAL FIRMWARE UPDATE REQUIRED", Fore.YELLOW)
-                # safe_print("="*60, Fore.YELLOW)
-                safe_print("\nAutomatic update failed. Please follow these steps to update manually:\n\n", Fore.RED)
+                safe_print("\nAutomatic update failed. Please follow these steps to update manually:\n", Fore.RED)
                 safe_print("1. Disconnect your Jumperless from USB", Fore.CYAN)
                 safe_print("2. Hold the BOOTSEL button while reconnecting USB", Fore.CYAN)
                 safe_print("3. Your Jumperless should appear as a USB drive", Fore.CYAN)
                 if jumperlessV5:
-                    safe_print("4. Look for a drive named 'RP2350'", Fore.CYAN)
+                    safe_print("4. Look for a drive named 'RP2350' or similar", Fore.CYAN)
+                    safe_print("   (May also appear as 'RPI-RP2' or just show up as a removable drive)", Fore.YELLOW)
                 else:
-                    safe_print("4. Look for a drive named 'RPI-RP2'", Fore.CYAN)
-                safe_print("5. Drag the 'firmware.uf2' file to that drive", Fore.CYAN)
-                safe_print("6. The Jumperless will automatically reboot with new firmware", Fore.CYAN)
-                safe_print("7. Restart this application to reconnect", Fore.CYAN)
-                safe_print("\nThe firmware.uf2 file is in the current directory.", Fore.GREEN)
+                    safe_print("4. Look for a drive named 'RPI-RP2' or similar", Fore.CYAN)
+                    safe_print("   (May also appear as a removable drive without a specific name)", Fore.YELLOW)
+                safe_print("5. The drive should contain files like INFO_UF2.TXT or INDEX.HTM", Fore.YELLOW)
+                safe_print("6. Drag the 'firmware.uf2' file to that drive", Fore.CYAN)
+                safe_print("7. The Jumperless will automatically reboot with new firmware", Fore.CYAN)
+                safe_print("8. Restart this application to reconnect", Fore.CYAN)
+                safe_print(f"\nThe firmware.uf2 file is in the current directory: {os.getcwd()}", Fore.GREEN)
+                safe_print("\nIf you can't find the drive, try checking File Explorer for any new removable drives", Fore.BLUE)
+                safe_print("that appeared after holding BOOTSEL and reconnecting USB.", Fore.BLUE)
                 
                 # input("\nPress Enter when you have completed the manual update...")
                 # safe_print("Please restart the application to reconnect to your Jumperless.", Fore.CYAN)
@@ -1641,6 +1780,26 @@ def get_latest_app_version():
         safe_print(f"Error checking for app updates: {e}", Fore.YELLOW)
         return None, None
 
+def is_running_from_executable():
+    """Check if we're running from a packaged executable"""
+    # Check for PyInstaller
+    if hasattr(sys, '_MEIPASS'):
+        return True
+    
+    # Check if the script doesn't end with .py (likely an executable)
+    script_path = sys.argv[0]
+    if not script_path.endswith('.py'):
+        return True
+    
+    # Check if __file__ is different from sys.argv[0] (another sign of packaging)
+    try:
+        if os.path.abspath(__file__) != os.path.abspath(sys.argv[0]):
+            return True
+    except:
+        return True  # If __file__ is not available, likely packaged
+    
+    return False
+
 def check_for_app_updates():
     """Check if there's a newer version of the app available"""
     global App_Version
@@ -1657,7 +1816,14 @@ def check_for_app_updates():
             safe_print(f"Current version: {App_Version}", Fore.YELLOW)
             safe_print(f"Latest version: {latest_version}", Fore.GREEN)
             if release_url:
-                safe_print(f"Release notes: {release_url}", Fore.BLUE)
+                safe_print(f"Release notes: {release_url}", Fore.MAGENTA)
+            
+            # Check if we're running from an executable
+            if is_running_from_executable():
+                safe_print("\nRunning from packaged executable - automatic app update not supported.", Fore.YELLOW)
+                safe_print("Please download the latest version from:", Fore.CYAN)
+                safe_print("https://github.com/Architeuthis-Flux/JumperlessV5/releases/latest", Fore.MAGENTA)
+                return False  # Don't attempt automatic update
             
             return True
         else:
@@ -1942,6 +2108,24 @@ pause
 def update_app_if_needed():
     """Check for and optionally perform app update"""
     try:
+        # Check if running from executable first
+        if is_running_from_executable():
+            # For executables, just check and inform, don't attempt update
+            safe_print("Checking for app updates...", Fore.CYAN)
+            
+            latest_version, release_url = get_latest_app_version()
+            if latest_version and compare_versions(App_Version, latest_version):
+                safe_print(f"\nNew app version available!", Fore.GREEN)
+                safe_print(f"Current version: {App_Version}", Fore.YELLOW)
+                safe_print(f"Latest version: {latest_version}", Fore.GREEN)
+                safe_print("\nRunning from packaged executable - automatic App update not supported.", Fore.YELLOW)
+                safe_print("Please download the latest version from:", Fore.CYAN)
+                safe_print("https://github.com/Architeuthis-Flux/JumperlessV5/releases/latest", Fore.RESET)
+            else:
+                safe_print(f"App is up to date (version {App_Version})", Fore.GREEN)
+            return
+        
+        # For script mode, use the existing update mechanism
         if check_for_app_updates():
             safe_print("\nWould you like to update the app now?", Fore.CYAN)
             
@@ -2733,7 +2917,8 @@ def bridge_menu():
     safe_print(" 'config'      to edit Arduino CLI upload configuration", Fore.YELLOW)
     safe_print(" 'update'      to force firmware update - yours is up to date (" + currentString + ")", Fore.BLUE)
     debug_status = " [DEBUG MODE]" if debug_app_update else ""
-    safe_print(" 'appupdate'   to check for app updates - current version " + App_Version + debug_status, Fore.MAGENTA)
+    executable_status = " (manual download only)" if is_running_from_executable() else ""
+    safe_print(" 'appupdate'   to check for app updates - current version " + App_Version + debug_status + executable_status, Fore.MAGENTA)
     safe_print(" 'debugupdate' to " + ("disable" if debug_app_update else "enable") + " app update debug mode", Fore.BLUE)
     safe_print(" 'status'      to check the serial connection status", Fore.CYAN) 
     safe_print(" [enter]       to exit the menu and return to Jumperless", Fore.GREEN)
@@ -4328,6 +4513,7 @@ def main():
 
 """, Fore.MAGENTA)
     print("\nNote: This app looks best on a dark background")
+    print("\nDocs are available at https://jumperless.org\n")
     create_directories()
         # Check for app updates
     update_app_if_needed()

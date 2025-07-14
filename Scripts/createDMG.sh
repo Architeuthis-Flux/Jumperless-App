@@ -12,5 +12,5 @@ create-dmg \
 --hide-extension "Jumperless.app" \
 --codesign "Kevin Cappuccio (LK2RWK9EUK)" \
 --add-folder "Jumperless Python" "Jumperless Python" 69 460 \
-"Jumperless_Installer.dmg" \
+"Jumperless_installer_macOS.dmg" \
 "JumperlessDMG/" 
