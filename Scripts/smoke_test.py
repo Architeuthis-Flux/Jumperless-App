@@ -20,14 +20,30 @@ def test_executable(executable_path, platform):
         return False
     
     try:
-        # Run with --version or --help flag if available
-        # Use a timeout to avoid hanging
-        result = subprocess.run(
-            [str(executable_path), "--help"],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        # Handle .app bundles differently on macOS
+        if platform == "macos" and str(executable_path).endswith('.app'):
+            # For .app bundles, just check if we can open them
+            # Don't actually launch the GUI app in CI
+            result = subprocess.run(
+                ["open", "-n", str(executable_path)],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            # Kill any launched processes to avoid hanging CI
+            try:
+                subprocess.run(["pkill", "-f", "Jumperless"], capture_output=True)
+            except:
+                pass
+        else:
+            # Run with --version or --help flag if available
+            # Use a timeout to avoid hanging
+            result = subprocess.run(
+                [str(executable_path), "--help"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
         
         if result.returncode == 0:
             print(f"SUCCESS: Executable runs successfully")
@@ -102,9 +118,12 @@ def test_package_structure(platform_dir, platform):
         return False
     
     # Check executable
-    executable_name = "Jumperless"
-    if platform == "windows":
-        executable_name += ".exe"
+    if platform == "macos":
+        executable_name = "Jumperless.app"
+    elif platform == "windows":
+        executable_name = "Jumperless.exe"
+    else:
+        executable_name = "Jumperless"
     
     executable_path = Path(platform_dir) / executable_name
     if not executable_path.exists():
@@ -140,9 +159,12 @@ def main():
         return 1
     
     # Test executable
-    executable_name = "Jumperless"
-    if args.platform == "windows":
-        executable_name += ".exe"
+    if args.platform == "macos":
+        executable_name = "Jumperless.app"
+    elif args.platform == "windows":
+        executable_name = "Jumperless.exe"
+    else:
+        executable_name = "Jumperless"
     
     executable_path = platform_dir / executable_name
     executable_ok = test_executable(executable_path, args.platform)

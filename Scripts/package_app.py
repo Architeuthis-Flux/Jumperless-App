@@ -335,9 +335,9 @@ def create_macos_dmg(macos_dir, arch):
         for item in macos_dir.iterdir():
             if item.is_dir():
                 if "Python" in item.name:
-                    # Keep track of Python fallback directory
-                    python_fallback_dir = item.name
-                    shutil.copytree(item, temp_dir / item.name)
+                    # Keep track of Python fallback directory, but rename for DMG
+                    python_fallback_dir = "JumperlessPython"
+                    shutil.copytree(item, temp_dir / python_fallback_dir)
                 else:
                     shutil.copytree(item, temp_dir / item.name)
             else:
