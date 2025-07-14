@@ -11,7 +11,7 @@ on:
 env:
   PYTHON_VERSION: "3.11"
   DISABLE_MACOS_DMG: "true"  # Flag to disable DMG creation for macOS
-  DISABLE_MACOS_NOTARIZATION: "true"  # Flag to disable notarization for macOS
+  DISABLE_MACOS_NOTARIZATION: "false"  # Flag to disable notarization for macOS
   
 jobs:
   build:
