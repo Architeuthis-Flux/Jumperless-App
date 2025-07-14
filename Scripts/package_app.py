@@ -306,6 +306,12 @@ chmod +x run_jumperless.sh
 ./run_jumperless.sh
 ```
 
+### macOS Security Warning
+If you get a security warning about unidentified developer:
+```bash
+xattr -d com.apple.quarantine run_jumperless.sh
+```
+
 ### Missing Dependencies
 ```bash
 pip install -r requirements.txt
@@ -369,7 +375,12 @@ def package_platform(platform, arch, output_dir):
     print(f"{platform.title()} package created in {platform_dir}")
 
 def try_create_macos_dmg(macos_dir, arch):
-    """Try to create macOS DMG if create-dmg is available"""
+    """Try to create macOS DMG if create-dmg is available and not disabled"""
+    # Check if DMG creation is disabled by environment variable
+    if os.environ.get("DISABLE_MACOS_DMG", "").lower() == "true":
+        print("DMG creation disabled by DISABLE_MACOS_DMG environment variable")
+        return
+    
     try:
         subprocess.run(["create-dmg", "--version"], check=True, capture_output=True)
         create_macos_dmg(macos_dir, arch)
@@ -484,6 +495,13 @@ open Jumperless.app
 ```
 
 The app will automatically launch in a new Terminal window for the best CLI experience.
+
+**Important for macOS users:** If you get a security warning about the app being from an unidentified developer, you may need to:
+1. Right-click the app and select "Open" to bypass Gatekeeper, OR
+2. Remove the quarantine attribute:
+   ```bash
+   xattr -d com.apple.quarantine Jumperless.app
+   ```
 '''
     elif platform == "windows":
         readme_content += '''
@@ -541,7 +559,22 @@ def create_archives(platform, output_dir):
         print(f"WARNING: No {platform} directory found")
         return
     
-    # Create ZIP archive (universal)
+    # Check if we should prefer tar.gz over zip
+    prefer_targz = os.environ.get("PREFER_TARGZ", "").lower() == "true"
+    
+    # Create tar.gz for Linux/macOS (especially when preferred)
+    if platform in ['linux', 'macos']:
+        tar_path = output_dir / f"Jumperless-{platform.title()}.tar.gz"
+        with tarfile.open(tar_path, 'w:gz') as tar:
+            tar.add(platform_dir, arcname=f"Jumperless-{platform.title()}")
+        print(f"Created tar.gz archive: {tar_path}")
+        
+        # Skip ZIP creation for Linux if tar.gz is preferred
+        if platform == 'linux' and prefer_targz:
+            print("Skipping ZIP creation for Linux (tar.gz preferred)")
+            return
+    
+    # Create ZIP archive (universal fallback or for Windows)
     zip_path = output_dir / f"Jumperless-{platform.title()}.zip"
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk(platform_dir):
@@ -549,12 +582,7 @@ def create_archives(platform, output_dir):
                 file_path = Path(root) / file
                 arcname = file_path.relative_to(platform_dir)
                 zipf.write(file_path, arcname)
-    
-    # Create tar.gz for Linux/macOS
-    if platform in ['linux', 'macos']:
-        tar_path = output_dir / f"Jumperless-{platform.title()}.tar.gz"
-        with tarfile.open(tar_path, 'w:gz') as tar:
-            tar.add(platform_dir, arcname=f"Jumperless-{platform.title()}")
+    print(f"Created ZIP archive: {zip_path}")
     
     print(f"Archives created for {platform}")
 
