@@ -15,6 +15,62 @@ import tarfile
 import json
 from pathlib import Path
 
+def setup_macos_launcher_hack(app_bundle_path):
+    """
+    Implement the launcher script hack for macOS to get persistent terminal
+    Based on the original packaging approach
+    """
+    print("Setting up macOS launcher script hack...")
+    
+    macos_dir = app_bundle_path / "Contents" / "MacOS"
+    original_executable = macos_dir / "Jumperless"
+    cli_executable = macos_dir / "Jumperless_cli"
+    
+    if not original_executable.exists():
+        print(f"Warning: Original executable not found: {original_executable}")
+        return
+    
+    # Rename the original executable to Jumperless_cli
+    if cli_executable.exists():
+        cli_executable.unlink()
+    original_executable.rename(cli_executable)
+    print(f"Renamed {original_executable} to {cli_executable}")
+    
+    # Create launcher script
+    launcher_script_content = '''#!/bin/bash
+# Jumperless macOS Launcher
+# Opens Terminal and runs the CLI application
+
+# Get the directory of this script (inside the app bundle)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CLI_EXECUTABLE="$SCRIPT_DIR/Jumperless_cli"
+
+# Check if CLI executable exists
+if [ ! -f "$CLI_EXECUTABLE" ]; then
+    echo "Error: CLI executable not found at $CLI_EXECUTABLE"
+    exit 1
+fi
+
+# Use AppleScript to open Terminal and run the CLI app
+osascript -e "
+tell application \\"Terminal\\"
+    activate
+    set newWindow to do script \\"\\"
+    delay 0.5
+    do script \\"cd '$SCRIPT_DIR' && ./Jumperless_cli\\" in newWindow
+    set bounds of front window to {100, 100, 1000, 700}
+end tell
+"
+'''
+    
+    # Write launcher script
+    with open(original_executable, 'w') as f:
+        f.write(launcher_script_content)
+    
+    # Make launcher script executable
+    os.chmod(original_executable, 0o755)
+    print(f"Created launcher script at {original_executable}")
+
 def create_python_fallback(platform, arch, output_dir):
     """Create Python fallback package with launcher script"""
     print(f"Creating Python fallback package for {platform}-{arch}")
@@ -273,13 +329,16 @@ def package_platform(platform, arch, output_dir):
     
     # Copy executable if it exists
     if platform == "macos":
-        # Handle .app bundle for macOS
+        # Handle .app bundle for macOS with launcher script hack
         app_bundle_name = "Jumperless.app"
         app_bundle_path = Path(f"dist/{platform}/{app_bundle_name}")
         if app_bundle_path.exists():
             # Copy the entire .app bundle
             shutil.copytree(app_bundle_path, platform_dir / app_bundle_name, dirs_exist_ok=True)
             print(f"Copied .app bundle: {app_bundle_name}")
+            
+            # Implement launcher script hack for persistent terminal
+            setup_macos_launcher_hack(platform_dir / app_bundle_name)
         else:
             print(f"Warning: .app bundle not found: {app_bundle_path}")
     else:
@@ -417,12 +476,14 @@ Or double-click the executable in your file manager.
 '''
     elif platform == "macos":
         readme_content += '''
-Double-click `Jumperless.app` in Finder to run.
+Double-click `Jumperless.app` in Finder to run. This will open a new Terminal window and run the Jumperless CLI application.
 
 Or open from Terminal:
 ```bash
 open Jumperless.app
 ```
+
+The app will automatically launch in a new Terminal window for the best CLI experience.
 '''
     elif platform == "windows":
         readme_content += '''
