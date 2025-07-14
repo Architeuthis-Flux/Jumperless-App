@@ -272,18 +272,30 @@ def package_platform(platform, arch, output_dir):
     platform_dir.mkdir(parents=True, exist_ok=True)
     
     # Copy executable if it exists
-    executable_name = "Jumperless"
-    if platform == "windows":
-        executable_name += ".exe"
-    
-    executable_path = Path(f"dist/{platform}/{executable_name}")
-    if executable_path.exists():
-        shutil.copy2(executable_path, platform_dir)
-        if platform != "windows":
-            os.chmod(platform_dir / executable_name, 0o755)
-        print(f"Copied executable: {executable_name}")
+    if platform == "macos":
+        # Handle .app bundle for macOS
+        app_bundle_name = "Jumperless.app"
+        app_bundle_path = Path(f"dist/{platform}/{app_bundle_name}")
+        if app_bundle_path.exists():
+            # Copy the entire .app bundle
+            shutil.copytree(app_bundle_path, platform_dir / app_bundle_name, dirs_exist_ok=True)
+            print(f"Copied .app bundle: {app_bundle_name}")
+        else:
+            print(f"Warning: .app bundle not found: {app_bundle_path}")
     else:
-        print(f"Warning: Executable not found: {executable_path}")
+        # Handle regular executable for Windows/Linux
+        executable_name = "Jumperless"
+        if platform == "windows":
+            executable_name += ".exe"
+        
+        executable_path = Path(f"dist/{platform}/{executable_name}")
+        if executable_path.exists():
+            shutil.copy2(executable_path, platform_dir)
+            if platform != "windows":
+                os.chmod(platform_dir / executable_name, 0o755)
+            print(f"Copied executable: {executable_name}")
+        else:
+            print(f"Warning: Executable not found: {executable_path}")
     
     # Create Python fallback
     create_python_fallback(platform, arch, platform_dir)
@@ -318,25 +330,55 @@ def create_macos_dmg(macos_dir, arch):
     temp_dir.mkdir()
     
     try:
-        # Copy contents to temp directory with simpler names
+        # Copy contents to temp directory 
+        python_fallback_dir = None
         for item in macos_dir.iterdir():
             if item.is_dir():
-                # Rename directories with spaces
-                safe_name = item.name.replace(" ", "_")
-                shutil.copytree(item, temp_dir / safe_name)
+                if "Python" in item.name:
+                    # Keep track of Python fallback directory
+                    python_fallback_dir = item.name
+                    shutil.copytree(item, temp_dir / item.name)
+                else:
+                    shutil.copytree(item, temp_dir / item.name)
             else:
                 shutil.copy2(item, temp_dir)
         
-        # Basic DMG creation with simpler arguments
+        # Copy DMG assets if they exist
+        icon_path = Path("assets/icons/icon.icns")
+        background_path = Path("JumperlessWokwiDMGwindow4x.png")
+        
+        if icon_path.exists():
+            shutil.copy2(icon_path, temp_dir / "icon.icns")
+        if background_path.exists():
+            shutil.copy2(background_path, temp_dir / "JumperlessWokwiDMGwindow4x.png")
+        
+        # Build DMG creation command
         cmd = [
-        "create-dmg",
-        "--volname", "Jumperless",
+            "create-dmg",
+            "--volname", "Jumperless",
             "--window-size", "600", "400",
-        "--icon-size", "100",
-        dmg_name,
-            str(temp_dir)
+            "--icon-size", "100",
+            "--app-drop-link", "450", "200",
         ]
-   
+        
+        # Add optional parameters if assets exist
+        if (temp_dir / "icon.icns").exists():
+            cmd.extend(["--volicon", str(temp_dir / "icon.icns")])
+        if (temp_dir / "JumperlessWokwiDMGwindow4x.png").exists():
+            cmd.extend(["--background", str(temp_dir / "JumperlessWokwiDMGwindow4x.png")])
+        
+        # Add app icon positioning if .app bundle exists
+        if (temp_dir / "Jumperless.app").exists():
+            cmd.extend(["--icon", "Jumperless.app", "150", "200"])
+            cmd.extend(["--hide-extension", "Jumperless.app"])
+        
+        # Add Python fallback folder if it exists
+        if python_fallback_dir and (temp_dir / python_fallback_dir).exists():
+            cmd.extend(["--add-folder", python_fallback_dir, python_fallback_dir, "150", "320"])
+        
+        # Add DMG name and source directory
+        cmd.extend([dmg_name, str(temp_dir)])
+
         subprocess.run(cmd, check=True)
         print(f"DMG created: {dmg_name}")
 
@@ -375,11 +417,12 @@ Or double-click the executable in your file manager.
 '''
     elif platform == "macos":
         readme_content += '''
-```bash
-./Jumperless
-```
+Double-click `Jumperless.app` in Finder to run.
 
-Or double-click the executable in Finder.
+Or open from Terminal:
+```bash
+open Jumperless.app
+```
 '''
     elif platform == "windows":
         readme_content += '''
@@ -399,7 +442,7 @@ If the native executable doesn't work, use the Python fallback:
 
 ## Package Contents
 
-- `Jumperless''' + ('.exe' if platform == 'windows' else '') + '''` - Native executable
+- `Jumperless''' + ('.app' if platform == 'macos' else '.exe' if platform == 'windows' else '') + '''` - Native executable
 - `Jumperless Python/` - Python source code fallback
 - `README.md` - This file
 

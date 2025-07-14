@@ -127,7 +127,7 @@ jobs:
         
         # Use PyInstaller with direct command line arguments for consistent builds
         echo "Building with PyInstaller"
-        python -m PyInstaller --clean --onefile --console --name "Jumperless" --distpath dist/macos --workpath build/macos --icon "assets/icons/icon.icns" JumperlessWokwiBridge.py
+        python -m PyInstaller --clean --windowed --name "Jumperless" --distpath dist/macos --workpath build/macos --icon "assets/icons/icon.icns" JumperlessWokwiBridge.py
           
     - name: Build with PyInstaller (Windows)
       if: matrix.platform == 'windows'
