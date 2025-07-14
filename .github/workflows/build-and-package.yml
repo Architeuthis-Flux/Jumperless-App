@@ -27,12 +27,7 @@ jobs:
             executable-name: "Jumperless"
             icon-path: "assets/icons/icon.png"
             
-          - os: ubuntu-latest
-            platform: linux
-            arch: x86
-            artifact-name: "Jumperless-Linux-x86"
-            executable-name: "Jumperless"
-            icon-path: "assets/icons/icon.png"
+
             
           # macOS builds (Intel)
           - os: macos-13
@@ -330,7 +325,6 @@ jobs:
           
           ### Downloads
           - **Linux x64**: Jumperless-Linux-x64 (tar.gz + Python fallback)
-          - **Linux x86**: Jumperless-Linux-x86 (tar.gz + Python fallback)
           - **macOS Intel**: Jumperless-macOS-Intel (App bundle + Python fallback)
           - **macOS Apple Silicon**: Jumperless-macOS-Apple-Silicon (App bundle + Python fallback)
           - **Windows x64**: Jumperless-Windows-x64 (EXE + Python fallback)
@@ -360,7 +354,7 @@ jobs:
           See the README.md in each package for detailed instructions.
           
           ### What's New
-          - Multi-platform CI/CD pipeline with x86 support
+          - Multi-platform CI/CD pipeline with Windows x86 support
           - macOS code signing support (notarization disabled by default for faster builds)
           - Improved packaging with modern tools
           - Better error handling and logging

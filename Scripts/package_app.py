@@ -590,7 +590,7 @@ def main():
     """Main packaging function"""
     parser = argparse.ArgumentParser(description="Package Jumperless for specific platform")
     parser.add_argument("--platform", required=True, choices=["linux", "macos", "windows"])
-    parser.add_argument("--arch", required=True, choices=["x64", "arm64"])
+    parser.add_argument("--arch", required=True, choices=["x64", "x86", "arm64"])
     
     args = parser.parse_args()
     
