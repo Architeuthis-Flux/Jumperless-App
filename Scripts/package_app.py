@@ -335,7 +335,7 @@ def package_platform(platform, arch, output_dir):
     
     # Copy executable if it exists
     if platform == "macos":
-        # Handle .app bundle for macOS with launcher script hack
+        # Handle .app bundle for macOS without launcher script hack
         app_bundle_name = "Jumperless.app"
         app_bundle_path = Path(f"dist/{platform}/{app_bundle_name}")
         if app_bundle_path.exists():
@@ -343,8 +343,9 @@ def package_platform(platform, arch, output_dir):
             shutil.copytree(app_bundle_path, platform_dir / app_bundle_name, dirs_exist_ok=True)
             print(f"Copied .app bundle: {app_bundle_name}")
             
-            # Implement launcher script hack for persistent terminal
-            setup_macos_launcher_hack(platform_dir / app_bundle_name)
+            # Launcher script hack is now applied BEFORE code signing in CI/CD
+            # Skip it here to avoid modifying the signed app bundle
+            print("Launcher script hack skipped - applied before code signing in CI/CD workflow")
         else:
             print(f"Warning: .app bundle not found: {app_bundle_path}")
     else:

@@ -143,6 +143,10 @@ jobs:
         echo "Building with PyInstaller"
         python -m PyInstaller --clean --windowed --name "Jumperless" --distpath dist/macos --workpath build/macos --icon "assets/icons/icon.icns" JumperlessWokwiBridge.py
         
+        # Apply launcher script hack BEFORE code signing and notarization
+        echo "Setting up macOS launcher script hack BEFORE code signing..."
+        python Scripts/setup_macos_launcher.py
+        
     - name: Code Sign macOS App
       if: matrix.platform == 'macos'
       env:
@@ -354,9 +358,17 @@ jobs:
           - **Windows x86**: Jumperless-Windows-x86 (EXE + Python fallback)
           
           ### macOS Users - Important Note
-          If the app is code-signed with a Developer ID, you should be able to run it directly.
           
-          **If you get a security warning, try these steps:**
+          **This release includes properly notarized macOS apps that should run without security warnings.**
+          
+          **To run the app:**
+          1. **Double-click** `Jumperless.app` - Opens Terminal automatically for CLI interaction
+          2. **Or run from Terminal** for direct console output:
+             ```bash
+             /path/to/Jumperless.app/Contents/MacOS/Jumperless
+             ```
+          
+          **If you still get a security warning:**
           1. Right-click the app and select "Open" to bypass Gatekeeper
           2. Or remove the quarantine attribute:
              ```bash
@@ -377,12 +389,15 @@ jobs:
           See the README.md in each package for detailed instructions.
           
           ### What's New
+          - **Full macOS notarization support** - Apps are properly signed and notarized
+          - **No more macOS security warnings** - Apps run without quarantine issues
           - Multi-platform CI/CD pipeline with Windows x86 support
-          - macOS code signing support (notarization disabled by default for faster builds)
           - Improved packaging with modern tools
           - Better error handling and logging
           - Enhanced platform-specific optimizations
           - Linux packages now use tar.gz format
+          - **macOS Terminal launcher** - Double-click opens Terminal automatically
+          - **Proper launcher script order** - Applied before code signing to maintain notarization
           
         draft: false
         prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
