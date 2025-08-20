@@ -4,8 +4,8 @@
 # KevinC@ppucc.io
 #
 
-App_Version = "1.1.1.11"
-new_requirements = True
+App_Version = "1.1.1.13"
+new_requirements = False
 
 
 
@@ -3517,7 +3517,7 @@ def force_clear_arduino_port():
     
     # Step 3: Test port accessibility
     safe_print("Testing Arduino port accessibility...", Fore.YELLOW)
-    for attempt in range(5):
+    for attempt in range(1):
         try:
             test_serial = serial.Serial(arduinoPort, 115200, timeout=0.1)
             test_serial.close()
@@ -3527,8 +3527,8 @@ def force_clear_arduino_port():
             if attempt < 4:
                 safe_print(f"Port still busy, waiting... (attempt {attempt + 1}/5)", Fore.YELLOW)
                 time.sleep(1.0)
-            else:
-                safe_print(f"Port still not accessible after 5 attempts: {e}", Fore.RED)
+            # else:
+            #     safe_print(f"Port still not accessible after 5 attempts: {e}", Fore.RED)
     
     # Step 4: Final diagnosis
     safe_print("Final port usage check:", Fore.YELLOW)
@@ -3625,26 +3625,26 @@ def flash_arduino_sketch(sketch_content, libraries_content="", slot_number=None)
 
     try:
         # Set UART mode for Arduino flashing
-        try:
-            ser.write(b"A?")
-            time.sleep(0.3)
-            response = ser.read_all() if hasattr(ser, 'read_all') else ser.read(ser.in_waiting or 1)
-            if b"Y" in response:
-                safe_print("UART lines are already connected", Fore.GREEN)
-                uart_was_connected = True
-            else:
-                safe_print("Setting UART mode...", Fore.CYAN)
-                ser.write(b"A")
-                uart_was_connected = False
-                uart_mode_changed = True
-            time.sleep(1.0)  # Allow UART mode to stabilize
-        except Exception as uart_error:
-            safe_print(f"UART mode setup issue: {uart_error}", Fore.YELLOW)
-            # Fallback: just set UART mode
-            ser.write(b"A")
-            uart_was_connected = False
-            uart_mode_changed = True
-            time.sleep(1.0)
+        # try:
+        #     ser.write(b"A?")
+        #     time.sleep(0.3)
+        #     response = ser.read_all() if hasattr(ser, 'read_all') else ser.read(ser.in_waiting or 1)
+        #     if b"Y" in response:
+        #         safe_print("UART lines are already connected", Fore.GREEN)
+        #         uart_was_connected = True
+        #     else:
+        #         safe_print("Setting UART mode...", Fore.CYAN)
+        #         ser.write(b"A")
+        #         uart_was_connected = False
+        #         uart_mode_changed = True
+        #     time.sleep(1.0)  # Allow UART mode to stabilize
+        # except Exception as uart_error:
+        #     safe_print(f"UART mode setup issue: {uart_error}", Fore.YELLOW)
+        #     # Fallback: just set UART mode
+        #     ser.write(b"A")
+        #     uart_was_connected = False
+        #     uart_mode_changed = True
+        #     time.sleep(1.0)
         # Create sketch directory
         sketch_dir = './WokwiSketch'
         compile_dir = './WokwiSketch/compile'
@@ -3718,21 +3718,21 @@ def flash_arduino_sketch(sketch_content, libraries_content="", slot_number=None)
         except Exception as e:
             safe_print(f"Compilation failed: {e}", Fore.RED)
             # Restore original UART state if needed
-            if ser and serialconnected and not uart_was_connected:
-                try:
-                    ser.write(b"a")  # Disconnect UART
-                    time.sleep(0.1)
-                except:
-                    pass
+            # if ser and serialconnected and not uart_was_connected:
+            #     try:
+            #         ser.write(b"a")  # Disconnect UART
+            #         time.sleep(0.1)
+            #     except:
+            #         pass
             return False
         # Reset Arduino to bootloader mode before upload
         safe_print("Resetting Arduino to bootloader mode...", Fore.CYAN)
-        try:
-            ser.write(b"r")
-            time.sleep(2.5)  # Give Arduino time to reset and enter bootloader
-            safe_print("Arduino reset complete", Fore.GREEN)
-        except Exception as reset_error:
-            safe_print(f"Could not send reset command: {reset_error}", Fore.YELLOW)
+        # try:
+        #     ser.write(b"r")
+        #     time.sleep(0.5)  # Give Arduino time to reset and enter bootloader
+        #     safe_print("Arduino reset complete", Fore.GREEN)
+        # except Exception as reset_error:
+        #     safe_print(f"Could not send reset command: {reset_error}", Fore.YELLOW)
 
         # Force clear Arduino port after reset
         safe_print("Ensuring Arduino port is available...", Fore.CYAN)
@@ -3841,17 +3841,17 @@ def flash_arduino_sketch(sketch_content, libraries_content="", slot_number=None)
                 except Exception as close_error:
                     safe_print(f"Note: Error closing Arduino port in cleanup: {close_error}", Fore.YELLOW)
             
-            # Restore UART state if we changed it
-            if uart_mode_changed and ser and serialconnected and not uart_was_connected:
-                try:
-                    time.sleep(0.1)
-                    ser.write(b"a")  # Disconnect UART
-                    time.sleep(0.1)
-                    safe_print("Restored UART mode", Fore.CYAN)
-                except Exception as uart_error:
-                    safe_print(f"Note: Error restoring UART mode: {uart_error}", Fore.YELLOW)
+            # # Restore UART state if we changed it
+            # if uart_mode_changed and ser and serialconnected and not uart_was_connected:
+            #     try:
+            #         time.sleep(0.1)
+            #         ser.write(b"a")  # Disconnect UART
+            #         time.sleep(0.1)
+            #         safe_print("Restored UART mode", Fore.CYAN)
+            #     except Exception as uart_error:
+            #         safe_print(f"Note: Error restoring UART mode: {uart_error}", Fore.YELLOW)
             
-            # Send menu command to return to normal mode
+            # # Send menu command to return to normal mode
             if ser and serialconnected:
                 try:
                     time.sleep(0.1)
