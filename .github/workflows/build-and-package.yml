@@ -126,7 +126,7 @@ jobs:
         docker run --rm -v "$PWD":/work -w /work quay.io/pypa/manylinux2014_x86_64 bash -lc '
           set -euo pipefail
           echo "Python versions available:"
-          ls -1 /opt/python | sed -n 's/^/  - /p'
+          ls -1 /opt/python | sed -n "s/^/  - /p"
           PY="/opt/python/cp311-cp311/bin/python"
           echo "Using Python: $PY"
           $PY -m pip install --upgrade pip
@@ -142,6 +142,8 @@ jobs:
             --icon "assets/icons/icon.png" \
             JumperlessWokwiBridge.py
         '
+        # Ensure host runner owns build artifacts created by container
+        sudo chown -R $(id -u):$(id -g) dist build || true
           
     - name: Build with PyInstaller (macOS)
       if: matrix.platform == 'macos'
