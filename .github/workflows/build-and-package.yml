@@ -119,23 +119,19 @@ jobs:
         create_version_info()
         "
         
-    - name: Build with PyInstaller (Linux, manylinux2014 for older glibc)
+    - name: Build with PyInstaller (Linux, Debian bullseye container for lower glibc)
       if: matrix.platform == 'linux'
       run: |
-        echo "Building inside manylinux2014_x86_64 container for wider glibc compatibility"
-        docker run --rm -v "$PWD":/work -w /work quay.io/pypa/manylinux2014_x86_64 bash -lc '
+        echo "Building inside python:3.11-bullseye container (glibc ~2.31)"
+        docker run --rm -v "$PWD":/work -w /work python:3.11-bullseye bash -lc '
           set -euo pipefail
-          echo "Python versions available:"
-          ls -1 /opt/python | sed -n "s/^/  - /p"
-          PY="/opt/python/cp311-cp311/bin/python"
-          echo "Using Python: $PY"
-          $PY -m pip install --upgrade pip
-          $PY -m pip install pyinstaller
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
           # Install project dependencies needed for build/runtime
-          if [ -f PackagingApps/packagerRequirements.txt ]; then $PY -m pip install -r PackagingApps/packagerRequirements.txt; fi
-          if [ -f requirements.txt ]; then $PY -m pip install -r requirements.txt; fi
+          if [ -f PackagingApps/packagerRequirements.txt ]; then python -m pip install -r PackagingApps/packagerRequirements.txt; fi
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
           # Build
-          $PY -m PyInstaller --clean --onefile --console \
+          python -m PyInstaller --clean --onefile --console \
             --name "Jumperless" \
             --distpath dist/linux \
             --workpath build/linux \
