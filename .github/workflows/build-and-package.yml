@@ -20,7 +20,7 @@ jobs:
       matrix:
         include:
           # Linux builds
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             platform: linux
             arch: x64
             artifact-name: "Jumperless-Linux-x64"
@@ -119,16 +119,29 @@ jobs:
         create_version_info()
         "
         
-    - name: Build with PyInstaller (Linux)
+    - name: Build with PyInstaller (Linux, manylinux2014 for older glibc)
       if: matrix.platform == 'linux'
       run: |
-        # Get absolute paths to avoid PyInstaller path issues
-        CURRENT_DIR=$(pwd)
-        echo "Current working directory: $CURRENT_DIR"
-        
-        # Use PyInstaller with direct command line arguments for consistent builds
-        echo "Building with PyInstaller"
-        python -m PyInstaller --clean --onefile --console --name "Jumperless" --distpath dist/linux --workpath build/linux --icon "assets/icons/icon.png" JumperlessWokwiBridge.py
+        echo "Building inside manylinux2014_x86_64 container for wider glibc compatibility"
+        docker run --rm -v "$PWD":/work -w /work quay.io/pypa/manylinux2014_x86_64 bash -lc '
+          set -euo pipefail
+          echo "Python versions available:"
+          ls -1 /opt/python | sed -n 's/^/  - /p'
+          PY="/opt/python/cp311-cp311/bin/python"
+          echo "Using Python: $PY"
+          $PY -m pip install --upgrade pip
+          $PY -m pip install pyinstaller
+          # Install project dependencies needed for build/runtime
+          if [ -f PackagingApps/packagerRequirements.txt ]; then $PY -m pip install -r PackagingApps/packagerRequirements.txt; fi
+          if [ -f requirements.txt ]; then $PY -m pip install -r requirements.txt; fi
+          # Build
+          $PY -m PyInstaller --clean --onefile --console \
+            --name "Jumperless" \
+            --distpath dist/linux \
+            --workpath build/linux \
+            --icon "assets/icons/icon.png" \
+            JumperlessWokwiBridge.py
+        '
           
     - name: Build with PyInstaller (macOS)
       if: matrix.platform == 'macos'
