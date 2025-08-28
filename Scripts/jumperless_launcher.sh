@@ -27,9 +27,9 @@ if [ -f "Jumperless" ]; then
     echo "[✓] Found executable: Jumperless"
 fi
 
-if [ -f "JumperlessWokwiBridge" ]; then
-    EXECUTABLE="./JumperlessWokwiBridge"
-    echo "[✓] Found executable: JumperlessWokwiBridge"
+if [ -f "Jumperless" ]; then
+    EXECUTABLE="./Jumperless"
+    echo "[✓] Found executable: Jumperless"
 fi
 
 # Determine what to run (prefer executable over Python script)
@@ -55,7 +55,7 @@ elif [ -n "$PYTHON_SCRIPT" ]; then
     fi
 else
     echo "[✗] ERROR: No Jumperless application found!"
-    echo "[i] Expected files: JumperlessWokwiBridge.py, Jumperless, or JumperlessWokwiBridge"
+    echo "[i] Expected files: JumperlessWokwiBridge.py, Jumperless, or Jumperless"
     echo "[i] Make sure this script is in the same directory as your Jumperless files"
     echo
     read -p "Press Enter to exit..."
