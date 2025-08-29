@@ -360,6 +360,7 @@ interactive_mode = False
 original_settings = None
 
 
+
 # Debug and configuration flags
 debug = False
 jumperlessV5 = False
@@ -4867,8 +4868,6 @@ def handle_interactive_input_simple():
         import tty
         import select
         
-        # Save original terminal settings (separate from readline settings)
-        original_terminal_settings = termios.tcgetattr(sys.stdin.fileno())
         
         try:
             # Set terminal to raw mode
@@ -5098,13 +5097,21 @@ def get_command_suggestions():
         
 
 def cleanup_on_exit():
+    import termios
+    import subprocess
+
+
     """Clean up all active processes and threads on script exit"""
     global active_processes, active_threads, ser, serialconnected, interactive_mode
-    import subprocess
-    
+
+    safe_print("\nRestoring Terminal Settings...", Fore.YELLOW)
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, original_terminal_settings)
+
+
     # Disable interactive mode first
     if interactive_mode:
         disable_interactive_mode()
+        
     
     # safe_print("\nCleaning up processes and threads...", Fore.YELLOW)
     
@@ -5164,9 +5171,14 @@ def cleanup_on_exit():
 if __name__ == "__main__":
     # Register cleanup function for normal exit
     import atexit
+    import termios
     atexit.register(cleanup_on_exit)
     
     try:
+        global original_terminal_settings
+    
+        original_terminal_settings = termios.tcgetattr(sys.stdin.fileno())
+    
         main()
     except KeyboardInterrupt:
         safe_print("\nKeyboard interrupt received (Ctrl+C)", Fore.YELLOW)
