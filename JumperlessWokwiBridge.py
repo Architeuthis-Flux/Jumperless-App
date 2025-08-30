@@ -4456,8 +4456,13 @@ def construct_jumperless_command(connections, is_jumperless_v5):
 def main():
     """Main application entry point"""
     global menuEntered, noWokwiStuff, currentSlotUpdate, forceWokwiUpdate
-    global lastDiagram, diagram, serialconnected, ser, justreconnected
+    global lastDiagram, diagram, serialconnected, ser, justreconnected, original_terminal_settings
     
+    if sys.platform != "win32":    
+        import termios
+        original_terminal_settings = termios.tcgetattr(sys.stdin.fileno())
+    
+
     # Initialize command history
     setup_command_history()
     
@@ -5104,9 +5109,6 @@ def cleanup_on_exit():
     """Clean up all active processes and threads on script exit"""
     global active_processes, active_threads, ser, serialconnected, interactive_mode
 
-    safe_print("\nRestoring Terminal Settings...", Fore.YELLOW)
-    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, original_terminal_settings)
-
 
     # Disable interactive mode first
     if interactive_mode:
@@ -5165,20 +5167,20 @@ def cleanup_on_exit():
     except Exception as e:
         safe_print(f"Error in final Arduino port clear: {e}", Fore.RED)
     
+    if sys.platform != "win32":
+        safe_print("\nRestoring Terminal Settings...", Fore.YELLOW)
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, original_terminal_settings)
+        safe_print("Restored Terminal Settings...", Fore.GREEN)
+
     safe_print("Cleanup completed", Fore.GREEN)
     
 
 if __name__ == "__main__":
     # Register cleanup function for normal exit
     import atexit
-    import termios
     atexit.register(cleanup_on_exit)
     
     try:
-        global original_terminal_settings
-    
-        original_terminal_settings = termios.tcgetattr(sys.stdin.fileno())
-    
         main()
     except KeyboardInterrupt:
         safe_print("\nKeyboard interrupt received (Ctrl+C)", Fore.YELLOW)
