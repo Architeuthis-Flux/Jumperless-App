@@ -1,3 +1,6 @@
+
+
+
 # SPDX-License-Identifier: MIT
 # Kevin Santo Cappuccio
 # Jumperless Bridge App
@@ -6,8 +9,6 @@
 
 App_Version = "1.1.1.13"
 new_requirements = False
-
-
 
 import pathlib
 import requests
@@ -98,7 +99,7 @@ if sys.platform == "win32":
 # Interactive mode will use termios on Unix-like systems
 import shutil
 
-# Platform-specific imports
+# Platform-specific imports and Variables
 if sys.platform == "win32":
     try:
         import win32api
@@ -106,6 +107,8 @@ if sys.platform == "win32":
     except ImportError:
         WIN32_AVAILABLE = False
 else:
+    import termios
+    original_terminal_settings =  termios.tcgetattr(sys.stdin.fileno())
     WIN32_AVAILABLE = False
 
 # SSL context setup
@@ -4863,12 +4866,13 @@ def handle_interactive_input_simple():
     
     # safe_print("Using simple character-by-character input", Fore.GREEN)
     
-    try:
-        import termios
+    try:        
         import tty
         import select
         
         
+        #original_terminal_settings = termios.tcgetattr(sys.stdin.fileno())
+
         try:
             # Set terminal to raw mode
             tty.setraw(sys.stdin.fileno())
@@ -5097,21 +5101,20 @@ def get_command_suggestions():
         
 
 def cleanup_on_exit():
-    import termios
     import subprocess
 
 
     """Clean up all active processes and threads on script exit"""
     global active_processes, active_threads, ser, serialconnected, interactive_mode
 
-    safe_print("\nRestoring Terminal Settings...", Fore.YELLOW)
-    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, original_terminal_settings)
-
-
     # Disable interactive mode first
     if interactive_mode:
         disable_interactive_mode()
-        
+    
+    if sys.platform != "win32":
+        safe_print("Restoring terminal settings...", Fore.YELLOW)
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, original_terminal_settings)
+        safe_print("Terminal settings restored", Fore.GREEN)
     
     # safe_print("\nCleaning up processes and threads...", Fore.YELLOW)
     
@@ -5171,14 +5174,10 @@ def cleanup_on_exit():
 if __name__ == "__main__":
     # Register cleanup function for normal exit
     import atexit
-    import termios
     atexit.register(cleanup_on_exit)
     
     try:
-        global original_terminal_settings
-    
-        original_terminal_settings = termios.tcgetattr(sys.stdin.fileno())
-    
+        
         main()
     except KeyboardInterrupt:
         safe_print("\nKeyboard interrupt received (Ctrl+C)", Fore.YELLOW)
