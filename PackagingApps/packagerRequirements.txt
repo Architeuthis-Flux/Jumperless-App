@@ -23,6 +23,10 @@ termcolor
 typing_extensions
 urllib3
 
+# GUI-specific packages for Qt integration
+PySide6>=6.6.0
+websockets>=12.0
+
 # Fix for PyInstaller libpython3.10.so issue
 backports-datetime-fromisoformat
 
