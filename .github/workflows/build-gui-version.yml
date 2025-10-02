@@ -92,7 +92,25 @@ jobs:
           libxi6 \
           libxcursor1
 
-    - name: Install dependencies with uv
+    - name: Install dependencies with uv (macOS - Universal binaries)
+      if: matrix.platform == 'macos'
+      run: |
+        uv venv
+        source venv/bin/activate
+        # Set environment variables for universal binary builds
+        export ARCHFLAGS="-arch x86_64 -arch arm64"
+        export _PYTHON_HOST_PLATFORM="macosx-10.9-universal2"
+        # Install pure Python packages
+        uv pip install beautifulsoup4 packaging requests pyduinocli
+        # Install packages with C extensions - rebuild from source for universal binaries
+        pip install --no-cache-dir --no-binary :all: psutil pyserial
+        # Install GUI-specific dependencies
+        uv pip install PySide6>=6.6.0 websockets>=12.0
+        # Install remaining requirements
+        uv pip install -r PackagingApps/packagerRequirements.txt
+        
+    - name: Install dependencies with uv (non-macOS)
+      if: matrix.platform != 'macos'
       run: |
         uv venv
         source venv/bin/activate || venv\\Scripts\\activate

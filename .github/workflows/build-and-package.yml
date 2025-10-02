@@ -100,7 +100,29 @@ jobs:
           brew install create-dmg
         fi
         
-    - name: Install Python dependencies
+    - name: Install Python dependencies (macOS - Universal binaries)
+      if: matrix.platform == 'macos'
+      run: |
+        # Set environment variables for universal binary builds
+        export ARCHFLAGS="-arch x86_64 -arch arm64"
+        export _PYTHON_HOST_PLATFORM="macosx-10.9-universal2"
+        echo "Installing dependencies with universal binary support..."
+        
+        # Install pure Python packages first
+        uv pip install --system beautifulsoup4 packaging requests pyduinocli
+        
+        # Install packages with C extensions - force rebuild from source for universal binaries
+        # Note: Using pip directly instead of uv for --no-binary flag
+        python -m pip install --no-cache-dir --no-binary :all: psutil pyserial
+        
+        # Install GUI packages (if prebuilt wheels are universal)
+        uv pip install --system PySide6 websockets
+        
+        # Install other requirements
+        uv pip install --system -r PackagingApps/packagerRequirements.txt
+        
+    - name: Install Python dependencies (non-macOS)
+      if: matrix.platform != 'macos'
       run: |
         uv pip install --system -r PackagingApps/packagerRequirements.txt
         uv pip install --system -r requirements.txt
@@ -150,9 +172,23 @@ jobs:
         echo "Contents of current directory:"
         ls -la
         
-        # Use PyInstaller with direct command line arguments for consistent builds
-        echo "Building with PyInstaller"
-        python -m PyInstaller --clean --windowed --name "Jumperless" --distpath dist/macos --workpath build/macos --icon "assets/icons/icon.icns" JumperlessWokwiBridge.py
+        # Verify dependencies are universal
+        echo "Verifying universal binaries..."
+        python -c "
+        import subprocess, glob, site
+        site_packages = site.getsitepackages()[0]
+        binaries = glob.glob(f'{site_packages}/psutil/_psutil_*.so')
+        for binary in binaries[:1]:  # Check at least one
+            result = subprocess.run(['lipo', '-info', binary], capture_output=True, text=True)
+            print(f'Checking {binary}')
+            print(result.stdout)
+            if 'x86_64' not in result.stdout or 'arm64' not in result.stdout:
+                print('WARNING: Dependencies may not be universal!')
+        "
+        
+        # Use PyInstaller with universal2 target for macOS
+        echo "Building universal binary (x86_64 + arm64) with PyInstaller"
+        python -m PyInstaller --clean --windowed --target-arch universal2 --name "Jumperless" --distpath dist/macos --workpath build/macos --icon "assets/icons/icon.icns" JumperlessWokwiBridge.py
         
         # Apply launcher script hack BEFORE code signing and notarization
         echo "Setting up macOS launcher script hack BEFORE code signing..."

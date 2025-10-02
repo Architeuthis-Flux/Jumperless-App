@@ -238,9 +238,72 @@ def check_and_update_requirements():
         print(f"❌ Error checking requirements: {e}")
         return False
 
+def check_universal_dependencies():
+    """Check if Python dependencies are universal binaries (x86_64 + arm64)"""
+    import sys
+    import site
+    
+    print("\n=== Checking Universal Binary Support ===")
+    
+    # Check Python itself
+    python_exe = sys.executable
+    try:
+        import subprocess
+        result = subprocess.run(['lipo', '-info', python_exe], 
+                              capture_output=True, text=True)
+        if 'x86_64' in result.stdout and 'arm64' in result.stdout:
+            print("✅ Python is universal (x86_64 + arm64)")
+        else:
+            print(f"⚠️  Python architecture: {result.stdout.strip()}")
+            print("   Warning: Python may not be universal")
+    except Exception as e:
+        print(f"⚠️  Could not check Python architecture: {e}")
+    
+    # Check key dependencies with binary extensions
+    site_packages = site.getsitepackages()[0]
+    dependencies_to_check = [
+        ('psutil', '_psutil_osx*.so'),
+        ('psutil', '_psutil_posix*.so'),
+    ]
+    
+    all_universal = True
+    for package, pattern in dependencies_to_check:
+        import glob
+        binaries = glob.glob(os.path.join(site_packages, package, pattern))
+        if binaries:
+            for binary in binaries:
+                try:
+                    result = subprocess.run(['lipo', '-info', binary], 
+                                          capture_output=True, text=True)
+                    if 'x86_64' in result.stdout and 'arm64' in result.stdout:
+                        print(f"✅ {os.path.basename(binary)} is universal")
+                    else:
+                        print(f"❌ {os.path.basename(binary)}: {result.stdout.strip()}")
+                        all_universal = False
+                except Exception as e:
+                    print(f"⚠️  Could not check {binary}: {e}")
+    
+    if not all_universal:
+        print("\n⚠️  WARNING: Some dependencies are not universal binaries!")
+        print("   The resulting app will only work on the current architecture.")
+        print("   To create a universal app, run:")
+        print("   ./Scripts/install_universal_deps.sh")
+        response = input("\n   Continue anyway? (y/n): ")
+        if response.lower() != 'y':
+            return False
+    else:
+        print("\n✅ All dependencies are universal - ready to build universal app!\n")
+    
+    return True
+
 def package_macos():
     """Package for macOS"""
     print("=== Packaging for macOS ===")
+    
+    # Check if dependencies are universal before building
+    if not check_universal_dependencies():
+        print("❌ Packaging cancelled - please install universal dependencies first")
+        return False
     
     # Get the absolute path to the icon for PyInstaller
     icon_abs_path = (current_path / icon_path).resolve()
@@ -254,9 +317,11 @@ def package_macos():
         icon_arg = f'--icon="{icon_abs_path}"'
         print(f"Using icon: {icon_abs_path}")
     
-    pyinstaller_cmd = f"python3 -m PyInstaller {icon_arg} -y --console --windowed JumperlessWokwiBridge.py --name Jumperless"
+    # Build as universal2 (x86_64 + arm64) for macOS
+    pyinstaller_cmd = f"python3 -m PyInstaller {icon_arg} -y --console --windowed --target-arch universal2 JumperlessWokwiBridge.py --name Jumperless"
     
     print(f"Running PyInstaller command: {pyinstaller_cmd}")
+    print("Building universal binary (x86_64 + arm64)...")
     result = os.system(pyinstaller_cmd)
     
     if result != 0:

@@ -106,6 +106,14 @@ if sys.platform == "win32":
     except ImportError:
         WIN32_AVAILABLE = False
 else:
+    import termios
+    
+    #this check is needed to avoid errors in non-interactive environments
+    if sys.stdin.isatty():
+        # Save original terminal settings (separate from readline settings)
+        original_terminal_settings = termios.tcgetattr(sys.stdin.fileno())
+
+
     WIN32_AVAILABLE = False
 
 # SSL context setup
@@ -4863,12 +4871,10 @@ def handle_interactive_input_simple():
     # safe_print("Using simple character-by-character input", Fore.GREEN)
     
     try:
-        import termios
+        
         import tty
         import select
         
-        # Save original terminal settings (separate from readline settings)
-        original_terminal_settings = termios.tcgetattr(sys.stdin.fileno())
         
         try:
             # Set terminal to raw mode
@@ -5102,6 +5108,9 @@ def cleanup_on_exit():
     global active_processes, active_threads, ser, serialconnected, interactive_mode
     import subprocess
     
+    if sys.platform != "win32" and 'original_terminal_settings' in globals():
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, original_terminal_settings)
+        
     # Disable interactive mode first
     if interactive_mode:
         disable_interactive_mode()

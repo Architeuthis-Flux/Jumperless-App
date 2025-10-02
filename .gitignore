@@ -83,6 +83,8 @@ target/
 profile_default/
 ipython_config.py
 
+src/fonts/MoreFonts/*
+
 # Other crap
 Packager/build/
 arduino-cli*
