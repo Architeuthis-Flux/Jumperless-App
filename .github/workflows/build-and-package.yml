@@ -127,11 +127,24 @@ jobs:
         uv pip install --system -r PackagingApps/packagerRequirements.txt
         uv pip install --system -r requirements.txt
         
-    - name: Install Python dependencies (Windows)
-      if: matrix.platform == 'windows'
+    - name: Install Python dependencies (Windows x64)
+      if: matrix.platform == 'windows' && matrix.arch == 'x64'
       run: |
-        # Use regular pip for Windows to avoid uv compatibility issues with x86
+        # Use regular pip for Windows - install all dependencies including GUI packages
         python -m pip install -r PackagingApps/packagerRequirements.txt
+        python -m pip install -r requirements.txt
+        
+    - name: Install Python dependencies (Windows x86)
+      if: matrix.platform == 'windows' && matrix.arch == 'x86'
+      run: |
+        # Windows x86: Skip PySide6 and websockets (not available for 32-bit on Python 3.11+)
+        # Install PyInstaller and core dependencies first
+        python -m pip install pyinstaller pyinstaller-hooks-contrib
+        
+        # Install other non-GUI requirements from packagerRequirements.txt
+        python -m pip install altgraph beautifulsoup4 certifi charset-normalizer colorama idna packaging psutil pyduinocli pyserial requests setuptools six soupsieve termcolor typing_extensions urllib3 backports-datetime-fromisoformat pywin32
+        
+        # Install requirements.txt (basic dependencies)
         python -m pip install -r requirements.txt
         
     - name: Verify PyInstaller installation
