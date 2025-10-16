@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jumperless"
+version = "1.1.1.15"
+description = "Jumperless Wokwi Bridge - Connect your Jumperless hardware to Wokwi projects and flash Arduino sketches"
+readme = "README_PYPI.md"
+requires-python = ">=3.8"
+authors = [
+    {name = "Kevin Santo Cappuccio", email = "KevinC@ppucc.io"}
+]
+keywords = ["jumperless", "wokwi", "arduino", "hardware", "embedded", "prototyping"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Topic :: Software Development :: Embedded Systems",
+    "Topic :: System :: Hardware",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+]
+
+dependencies = [
+    "beautifulsoup4>=4.13.4",
+    "packaging>=24.1",
+    "psutil>=5.9.8",
+    "pyduinocli>=0.35.0",
+    "pyserial>=3.5",
+    "requests>=2.32.3",
+    "colorama>=0.4.6",  # Cross-platform color support
+    "pywin32>=306; platform_system == 'Windows'",
+    "pynput; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.6.0",
+    "websockets>=12.0",
+]
+dev = [
+    "build>=1.0.0",
+    "twine>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://jumperless.org"
+Documentation = "https://jumperless.org"
+Repository = "https://github.com/Architeuthis-Flux/Jumperless-App"
+"Bug Tracker" = "https://github.com/Architeuthis-Flux/JumperlessV5/issues"
+
+[project.scripts]
+jumperless = "jumperless_pkg.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+license-files = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jumperless_pkg*"]
+
+[tool.setuptools.package-data]
+jumperless_pkg = ["assets/**/*", "JumperlessFiles/**/*"]
+

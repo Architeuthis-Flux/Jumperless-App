@@ -4,8 +4,8 @@
 # KevinC@ppucc.io
 #
 
-App_Version = "1.1.1.14"
-new_requirements = False
+App_Version = "1.1.1.15"
+new_requirements = True
 
 
 
@@ -390,6 +390,7 @@ menuEntered = 0
 justChecked = 0
 reading = 0
 forceWokwiUpdate = 0
+shutting_down = False  # Flag to prevent reconnection during intentional shutdown
 
 # Port and device information
 portName = ''
@@ -1801,6 +1802,7 @@ def compare_versions(version1, version2):
 
 def get_latest_app_version():
     """Get the latest app version by downloading and reading the script file"""
+    return "1.1.1.1", "debug://local-file"
     try:
         # Debug mode: read from local file
         if debug_app_update:
@@ -2266,7 +2268,7 @@ def update_app_if_needed():
         # Check if running from executable first
         if is_running_from_executable():
             # For executables, just check and inform, don't attempt update
-            safe_print("Checking for app updates...", Fore.CYAN)
+            #safe_print("Checking for app updates...", Fore.CYAN)
             
             latest_version, release_url = get_latest_app_version()
             if latest_version and compare_versions(App_Version, latest_version):
@@ -2492,6 +2494,51 @@ def search_saved_projects(input_to_search, return_name=False):
         safe_print(f"\nNo project found with name '{input_str}'", Fore.RED)
         return None
 
+def print_config_files():
+    """Display the contents and paths of configuration files"""
+    safe_print("\n" + "="*80, Fore.CYAN)
+    safe_print("Configuration Files", Fore.CYAN)
+    safe_print("="*80, Fore.CYAN)
+    
+    # Print slotAssignments.txt
+    safe_print(f"\nSlot Assignments File:", Fore.YELLOW)
+    safe_print(f"  Path: {slotAssignmentsFile}", Fore.BLUE)
+    try:
+        if os.path.exists(slotAssignmentsFile):
+            with open(slotAssignmentsFile, 'r') as f:
+                content = f.read().strip()
+                if content:
+                    safe_print(f"  Contents:", Fore.GREEN)
+                    for line in content.split('\n'):
+                        safe_print(f"    {line}", Fore.WHITE)
+                else:
+                    safe_print(f"  Contents: (empty)", Fore.YELLOW)
+        else:
+            safe_print(f"  Status: File does not exist yet", Fore.YELLOW)
+    except Exception as e:
+        safe_print(f"  Error reading file: {e}", Fore.RED)
+    
+    # Print savedProjects.txt
+    safe_print(f"\nSaved Projects File:", Fore.YELLOW)
+    safe_print(f"  Path: {savedProjectsFile}", Fore.BLUE)
+    try:
+        if os.path.exists(savedProjectsFile):
+            with open(savedProjectsFile, 'r') as f:
+                content = f.read().strip()
+                if content:
+                    safe_print(f"  Contents:", Fore.GREEN)
+                    for line in content.split('\n'):
+                        safe_print(f"    {line}", Fore.WHITE)
+                else:
+                    safe_print(f"  Contents: (empty)", Fore.YELLOW)
+        else:
+            safe_print(f"  Status: File does not exist yet", Fore.YELLOW)
+    except Exception as e:
+        safe_print(f"  Error reading file: {e}", Fore.RED)
+    
+    safe_print("\n" + "="*80 + "\n", Fore.CYAN)
+    input("Press Enter to continue...")
+
 def assign_wokwi_slots():
     """Interactive slot assignment - returns (changes_made, return_to_menu)"""
     global slotURLs, slotAPIurls, slotFilePaths, slotFileModTimes, slotFileHashes, numAssignedSlots, noWokwiStuff, menuEntered, currentString
@@ -2505,9 +2552,13 @@ def assign_wokwi_slots():
     else:
         safe_print("")
 
+    # Print configuration file paths
+    safe_print(f"\n  Config files: {os.path.dirname(slotAssignmentsFile)}", Fore.CYAN)
+    safe_print("\n      'p' to print config file contents and paths", Fore.CYAN)
     # Print slot options
     safe_print("\n      'x' to clear all slots", Fore.RED)
     safe_print("      'c' to clear a single slot", Fore.RED)
+
     safe_print("\nEnter the slot number you'd like to assign a project to:\n", Fore.MAGENTA)
     
     # Show current slot assignments
@@ -2535,6 +2586,10 @@ def assign_wokwi_slots():
         elif slot_input == 'update':
             update_jumperless_firmware(force=True)
             return (changes_made, True)  # Return to bridge menu after update
+        elif slot_input == 'p':
+            # Print config file contents and paths
+            print_config_files()
+            return assign_wokwi_slots()  # Show menu again after displaying files
         elif slot_input == '':
             # Empty input - return to bridge menu if no changes, main loop if changes made
             if numAssignedSlots == 0 and not changes_made:
@@ -2714,6 +2769,71 @@ def assign_wokwi_slots():
     except Exception as e:
         safe_print(f"Error updating slot: {e}", Fore.RED)
         return (changes_made, True)
+
+# ============================================================================
+# WOKWI URL HANDLER
+# ============================================================================
+
+def handle_pasted_wokwi_url(wokwi_url):
+    """Handle a Wokwi URL pasted directly into the app
+    
+    Args:
+        wokwi_url: The Wokwi project URL
+        
+    Returns:
+        True if handled successfully, False otherwise
+    """
+    global slotURLs, slotFilePaths, slotAPIurls, numAssignedSlots, noWokwiStuff, currentActiveSlot
+    
+    try:
+        # Validate URL format
+        if not wokwi_url.startswith('https://wokwi.com/projects/'):
+            return False
+            
+        # Check if URL already exists in saved projects, get name if it does
+        project_name = search_saved_projects(wokwi_url, return_name=True)
+        
+        # If project_name is None, the URL wasn't in saved projects
+        # search_saved_projects with return_name=True will prompt for name and save it
+        if project_name is None:
+            project_name = "Unnamed Project"
+        
+        # Assign to active slot
+        slot_num = currentActiveSlot
+        slotURLs[slot_num] = wokwi_url
+        slotFilePaths[slot_num] = '!'  # Clear file path slot
+        slotAPIurls[slot_num] = wokwi_url.replace(
+            "https://wokwi.com/projects/", 
+            "https://wokwi.com/api/projects/"
+        ) + "/diagram.json"
+        
+        # Save slot assignment to file
+        try:
+            with open(slotAssignmentsFile, 'w') as f:
+                for i in range(8):
+                    if slotURLs[i] != '!' or slotFilePaths[i] != '!':
+                        path_or_url = slotURLs[i] if slotURLs[i] != '!' else slotFilePaths[i]
+                        f.write(f"{i}\t{path_or_url}\n")
+            
+            # Update slot count and flags
+            numAssignedSlots = count_assigned_slots()
+            if numAssignedSlots > 0:
+                noWokwiStuff = False
+            
+            # Provide user feedback
+            safe_print(f"\n✓ '{project_name}' assigned to active slot {slot_num}", Fore.GREEN)
+            safe_print(f"  URL: {wokwi_url}", Fore.BLUE)
+            safe_print(f"  The project will start updating automatically\n", Fore.CYAN)
+            
+            return True
+            
+        except Exception as e:
+            safe_print(f"Error saving slot assignment: {e}", Fore.RED)
+            return False
+            
+    except Exception as e:
+        safe_print(f"Error handling Wokwi URL: {e}", Fore.RED)
+        return False
 
 # ============================================================================
 # FLASH COMMAND FUNCTIONS
@@ -3105,11 +3225,11 @@ def bridge_menu():
     safe_print("\n\n         Jumperless App Menu\n", Fore.MAGENTA)
     
     safe_print(" 'menu'        to open the app menu (this menu)", Fore.BLUE)  
-    safe_print(" 'interactive' to " + ("disable" if interactive_mode else "enable") + " real-time character mode - " + ("ON" if interactive_mode else "OFF")  , Fore.RED if interactive_mode else Fore.GREEN)
+    safe_print(" 'interactive' to " + ("disable" if interactive_mode else "enable") + " real-time character mode - " + ("ON" if interactive_mode else "OFF")  , Fore.RED if interactive_mode else Fore.MAGENTA)
     safe_print(" 'wokwi'       to " + ("enable" if noWokwiStuff else "disable") + " Wokwi updates " + ("and just use as a terminal" if not noWokwiStuff else ""), Fore.CYAN)
-    safe_print(" 'rate'        to change the Wokwi update rate", Fore.GREEN)
+    safe_print(" 'rate'        to change the Wokwi update rate" + (" (current: " + str(wokwiUpdateRate) + "s)" if wokwiUpdateRate + 0.4 else ""), Fore.GREEN)
     safe_print(" 'slots'       to assign Wokwi projects to slots - " + str(numAssignedSlots) + " assigned", Fore.YELLOW)
-    safe_print(" 'active'      to manually set active slot (currently " + str(currentActiveSlot) + ")", Fore.YELLOW)
+    safe_print(" 'active'      to manually set active slot (currently Slot " + str(currentActiveSlot) + ")", Fore.CYAN)
     safe_print(" 'flash'       to flash Arduino with assigned slot content (works outside menu too)", Fore.MAGENTA)
     safe_print(" 'arduino'     to " + ("enable" if disableArduinoFlashing else "disable") + " Arduino flashing from wokwi", Fore.RED)
     safe_print(" 'debug'       to " + ("disable" if debugWokwi else "enable") + " Wokwi debug output - " + ("on" if debugWokwi else "off"), Fore.MAGENTA)
@@ -3119,8 +3239,10 @@ def bridge_menu():
     executable_status = " (manual download only)" if is_running_from_executable() else ""
     safe_print(" 'appupdate'   to check for app updates - current version " + App_Version + debug_status + executable_status, Fore.MAGENTA)
     safe_print(" 'debugupdate' to " + ("disable" if debug_app_update else "enable") + " app update debug mode", Fore.BLUE)
-    safe_print(" 'status'      to check the serial connection status", Fore.CYAN)
+    safe_print(" 'status'      to check the serial connection status", Fore.RED)
     safe_print(" 'port'        to manually select a different serial port (current: " + (portName if portName else "None") + ")", Fore.YELLOW)
+    safe_print(" 'paths'       to display config file paths and contents", Fore.CYAN)
+    safe_print(" 'quit'        to quit the app", Fore.RED)
     safe_print(" [enter]       to exit the menu and return to Jumperless", Fore.GREEN)
     
     while menuEntered:
@@ -3241,6 +3363,18 @@ def bridge_menu():
                 # Manual port selection
                 manual_port_selection()
                 continue
+            elif choice == 'paths':
+                # Display config file paths and contents
+                print_config_files()
+                continue
+            elif choice == 'quit':
+                # Quit the application
+                global shutting_down
+                shutting_down = True  # Signal threads to stop reconnection attempts
+                safe_print("\nQuitting Jumperless App...", Fore.YELLOW)
+                cleanup_on_exit()
+                # Use os._exit() to bypass atexit handlers and immediately terminate
+                os._exit(0)
             elif choice == 'exit':
                 menuEntered = 0
                 ser.write(b'm')
@@ -4478,8 +4612,11 @@ def process_wokwi_sketch_and_flash(wokwi_url, slot_number=None):
 
 def check_presence(correct_port, interval):
     """Monitor serial port presence and reconnect if needed"""
-    global ser, portName, justreconnected, serialconnected, portNotFound, updateInProgress
+    global ser, portName, justreconnected, serialconnected, portNotFound, updateInProgress, shutting_down
     while True:
+        # Exit thread if shutting down
+        if shutting_down:
+            return
         if updateInProgress == 0:
             try:
                 # Check if the port is actually available in the system
@@ -4553,9 +4690,12 @@ def check_presence(correct_port, interval):
 
 def serial_term_in():
     """Handle incoming serial data with reliable byte-by-byte reading and interactive mode control"""
-    global serialconnected, ser, menuEntered, portNotFound, justreconnected, updateInProgress, interactive_mode
+    global serialconnected, ser, menuEntered, portNotFound, justreconnected, updateInProgress, interactive_mode, shutting_down
     
     while True:
+        # Exit thread if shutting down
+        if shutting_down:
+            return
         # Always check for interactive mode control characters, even during menu/updates
         if updateInProgress == 0:
             try:
@@ -4683,9 +4823,12 @@ def serial_term_in():
 
 def serial_term_out():
     """Handle outgoing serial commands with command history support and interactive mode"""
-    global serialconnected, ser, menuEntered, forceWokwiUpdate, noWokwiStuff, justreconnected, portNotFound, updateInProgress, interactive_mode, output_buffer
+    global serialconnected, ser, menuEntered, forceWokwiUpdate, noWokwiStuff, justreconnected, portNotFound, updateInProgress, interactive_mode, output_buffer, shutting_down
     
     while True:
+        # Exit thread if shutting down
+        if shutting_down:
+            return
         if menuEntered == 0 and updateInProgress == 0:
             try:
                 # Check if we should enter interactive mode
@@ -4783,6 +4926,13 @@ def serial_term_out():
                             except Exception:
                                 pass
                     continue
+                
+                # Check if user pasted a Wokwi URL
+                if output_buffer.startswith('https://wokwi.com/projects/'):
+                    # Handle Wokwi URL - assign to active slot and prompt for name
+                    if handle_pasted_wokwi_url(output_buffer):
+                        continue
+                    # If handling failed, fall through to send to serial
                 
                 # Send to serial port (only non-empty commands)
                 with serial_lock:
@@ -5399,7 +5549,7 @@ def handle_interactive_input_simple():
             
             while interactive_mode:
                 # Check if input is available with a short timeout
-                if select.select([sys.stdin], [], [], 0.1)[0]:
+                if select.select([sys.stdin], [], [], 0.025)[0]:
                     char = sys.stdin.read(1)
                     
                     # Handle special characters
@@ -5622,8 +5772,11 @@ def get_command_suggestions():
 
 def cleanup_on_exit():
     """Clean up all active processes and threads on script exit"""
-    global active_processes, active_threads, ser, serialconnected, interactive_mode
+    global active_processes, active_threads, ser, serialconnected, interactive_mode, shutting_down
     import subprocess
+    
+    # Set shutdown flag to stop all threads
+    shutting_down = True
     
     if sys.platform != "win32" and 'original_terminal_settings' in globals():
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, original_terminal_settings)

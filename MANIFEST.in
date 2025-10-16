@@ -1,0 +1,21 @@
+# Include documentation and license
+include README_PYPI.md
+include LICENSE
+include requirements.txt
+
+# Include asset files
+recursive-include assets *
+include assets/avrdudeCustom.conf
+
+# Include example files
+include WokwiSketch/*.ino
+
+# Exclude build artifacts and cache
+global-exclude *.pyc
+global-exclude __pycache__
+global-exclude *.so
+global-exclude .DS_Store
+prune build
+prune dist
+prune *.egg-info
+

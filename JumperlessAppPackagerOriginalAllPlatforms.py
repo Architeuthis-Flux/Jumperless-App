@@ -59,9 +59,8 @@ def check_and_update_requirements():
             'pyserial',        # For serial communication (imported as 'serial')
             'psutil',          # For system/process monitoring
             'beautifulsoup4',  # For HTML parsing (imported as 'bs4')
-            'termios',
-            'tty',
-            'select',
+            # Note: termios, tty, select are standard library modules on Unix/macOS
+            # They don't need to be installed via pip
             # 'pynput',         # For keyboard and mouse input (optional but recommended)
             # 'pywin32',         # For Windows volume detection and APIs
             # 'pyduinocli',      # For Arduino CLI support (optional but recommended)
