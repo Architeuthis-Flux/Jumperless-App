@@ -121,11 +121,18 @@ jobs:
         # Install other requirements
         uv pip install --system -r PackagingApps/packagerRequirements.txt
         
-    - name: Install Python dependencies (non-macOS)
-      if: matrix.platform != 'macos'
+    - name: Install Python dependencies (Linux)
+      if: matrix.platform == 'linux'
       run: |
         uv pip install --system -r PackagingApps/packagerRequirements.txt
         uv pip install --system -r requirements.txt
+        
+    - name: Install Python dependencies (Windows)
+      if: matrix.platform == 'windows'
+      run: |
+        # Use regular pip for Windows to avoid uv compatibility issues with x86
+        python -m pip install -r PackagingApps/packagerRequirements.txt
+        python -m pip install -r requirements.txt
         
     - name: Verify PyInstaller installation
       run: |

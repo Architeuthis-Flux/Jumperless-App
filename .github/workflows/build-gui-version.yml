@@ -95,41 +95,45 @@ jobs:
     - name: Install dependencies with uv (macOS - Universal binaries)
       if: matrix.platform == 'macos'
       run: |
-        uv venv
-        source venv/bin/activate
         # Set environment variables for universal binary builds
         export ARCHFLAGS="-arch x86_64 -arch arm64"
         export _PYTHON_HOST_PLATFORM="macosx-10.9-universal2"
-        # Install pure Python packages
-        uv pip install beautifulsoup4 packaging requests pyduinocli
-        # Install packages with C extensions - rebuild from source for universal binaries
-        pip install --no-cache-dir --no-binary :all: psutil pyserial
-        # Install GUI-specific dependencies
-        uv pip install PySide6>=6.6.0 websockets>=12.0
-        # Install remaining requirements
-        uv pip install -r PackagingApps/packagerRequirements.txt
+        echo "Installing dependencies with universal binary support..."
         
-    - name: Install dependencies with uv (non-macOS)
-      if: matrix.platform != 'macos'
+        # Install pure Python packages first
+        uv pip install --system beautifulsoup4 packaging requests pyduinocli
+        
+        # Install packages with C extensions - force rebuild from source for universal binaries
+        # Note: Using pip directly instead of uv for --no-binary flag
+        python -m pip install --no-cache-dir --no-binary :all: psutil pyserial
+        
+        # Install GUI-specific dependencies (if prebuilt wheels are universal)
+        uv pip install --system PySide6>=6.6.0 websockets>=12.0
+        
+        # Install remaining requirements
+        uv pip install --system -r PackagingApps/packagerRequirements.txt
+        
+    - name: Install dependencies with uv (Linux)
+      if: matrix.platform == 'linux'
       run: |
-        uv venv
-        source venv/bin/activate || venv\\Scripts\\activate
-        uv pip install -r requirements.txt
-        uv pip install -r PackagingApps/packagerRequirements.txt
+        uv pip install --system -r requirements.txt
+        uv pip install --system -r PackagingApps/packagerRequirements.txt
         # Ensure GUI-specific dependencies are installed
-        uv pip install PySide6>=6.6.0 websockets>=12.0
+        uv pip install --system PySide6>=6.6.0 websockets>=12.0
+    
+    - name: Install dependencies (Windows)
+      if: matrix.platform == 'windows'
+      run: |
+        # Use regular pip for Windows to avoid uv compatibility issues with x86
+        python -m pip install -r requirements.txt
+        python -m pip install -r PackagingApps/packagerRequirements.txt
+        # Ensure GUI-specific dependencies are installed
+        python -m pip install PySide6>=6.6.0 websockets>=12.0
     
     - name: Set up environment variables
       shell: bash
       run: |
-        echo "VIRTUAL_ENV=$(pwd)/venv" >> $GITHUB_ENV
-        if [ "$RUNNER_OS" == "Windows" ]; then
-          echo "$(pwd)/venv/Scripts" >> $GITHUB_PATH
-          echo "PYTHON_EXE=$(pwd)/venv/Scripts/python.exe" >> $GITHUB_ENV
-        else
-          echo "$(pwd)/venv/bin" >> $GITHUB_PATH
-          echo "PYTHON_EXE=$(pwd)/venv/bin/python" >> $GITHUB_ENV
-        fi
+        # Set UPX_DISABLE to avoid compression issues
         echo "UPX_DISABLE=1" >> $GITHUB_ENV
         
     - name: Create version info (Windows)
