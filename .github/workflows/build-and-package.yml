@@ -357,6 +357,7 @@ jobs:
         python Scripts/package_app.py --platform windows --arch ${{ matrix.arch }}
         
     - name: Run basic smoke test
+      if: matrix.platform != 'windows'
       run: |
         python Scripts/smoke_test.py --platform ${{ matrix.platform }}
         

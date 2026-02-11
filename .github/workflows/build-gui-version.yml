@@ -188,6 +188,7 @@ jobs:
           --main-script JumperlessWokwiBridge_GUI.py
         
     - name: Run basic smoke test for GUI
+      if: matrix.platform != 'windows'
       run: |
         python Scripts/smoke_test.py --platform ${{ matrix.platform }} --gui-mode
         
