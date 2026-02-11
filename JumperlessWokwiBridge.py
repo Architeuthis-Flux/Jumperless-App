@@ -29,6 +29,17 @@ import subprocess
 import tempfile
 import traceback
 
+# On Windows, default console encoding is often cp1252 (Windows-1252), which cannot
+# encode Unicode box-drawing and other characters. Use UTF-8 for stdout/stderr
+# so all print() and colorama output works without UnicodeEncodeError.
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (OSError, AttributeError):
+        pass
 
 # Try to import packaging for robust version comparison
 try:
