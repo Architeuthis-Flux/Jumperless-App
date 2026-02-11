@@ -38,11 +38,18 @@ def test_executable(executable_path, platform):
         else:
             # Run with --version or --help flag if available
             # Use a timeout to avoid hanging
+            # On Windows CI (e.g. cp1252), use UTF-8 so the app's Unicode banner doesn't raise UnicodeEncodeError
+            run_env = os.environ.copy()
+            if platform == "windows":
+                run_env["PYTHONIOENCODING"] = "utf-8"
             result = subprocess.run(
                 [str(executable_path), "--help"],
                 capture_output=True,
                 text=True,
-                timeout=30
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                env=run_env,
             )
         
         if result.returncode == 0:

@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Jumperless
-Exec=AppRun
-Icon=icon
-Comment=Jumperless Wokwi Bridge App
-Categories=Development;Electronics;Education;
-Terminal=true
-StartupNotify=false
