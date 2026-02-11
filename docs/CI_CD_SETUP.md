@@ -102,7 +102,7 @@ strategy:
       - os: ubuntu-latest
         platform: linux
         arch: x64
-      - os: macos-13
+      - os: macos-14
         platform: macos
         arch: x64
       - os: macos-latest

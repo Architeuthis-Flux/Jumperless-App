@@ -4,7 +4,7 @@
 # KevinC@ppucc.io
 #
 
-App_Version = "1.1.1.15"
+App_Version = "1.1.1.18"
 new_requirements = True
 
 
@@ -27,6 +27,7 @@ from bs4 import BeautifulSoup
 import re
 import subprocess
 import tempfile
+import traceback
 
 
 # Try to import packaging for robust version comparison
@@ -356,6 +357,20 @@ noArduinocli = True
 
 # Threading locks for thread-safe operations
 serial_lock = threading.Lock()
+
+# Larger serial buffers reduce dropped data when device sends bursts (e.g. ANSI LED dump).
+# set_buffer_size is supported on Windows; other platforms may ignore or lack it.
+SERIAL_RX_BUFFER_SIZE = 262144   # 256KB - absorb large bursts before we read
+SERIAL_TX_BUFFER_SIZE = 32768
+
+def _set_serial_buffers(port_handle):
+    """Increase serial rx/tx buffer sizes to handle fast bursts (e.g. ANSI from device)."""
+    if port_handle is None:
+        return
+    try:
+        port_handle.set_buffer_size(rx_size=SERIAL_RX_BUFFER_SIZE, tx_size=SERIAL_TX_BUFFER_SIZE)
+    except Exception:
+        pass
 wokwi_update_lock = threading.Lock()
 arduino_flash_lock = threading.Lock()  # Prevent concurrent Arduino uploads
 
@@ -376,6 +391,7 @@ disableArduinoFlashing = 1
 noArduinocli = True
 debugWokwi = False  # New debug flag for Wokwi updates
 flashWithoutArduinoPresent = None  # User preference: None=ask, True=flash anyway, False=don't flash
+_simulate_connect_fail = 2  # >0: monkey-patch serial.Serial to fail this many times with OSError 22
 
 # Arduino CLI configuration
 if noArduinocli == True:
@@ -673,18 +689,97 @@ def process_local_file_and_flash(slot_number):
 # SERIAL COMMUNICATION FUNCTIONS
 # ============================================================================
 
+# OSError 22 (EINVAL/Invalid Parameter) during USB hot-plug - device list in flux
+_ERRNO_HOTPLUG = 22
+
+def _is_oserror22(e):
+    """True if exception is or wraps OSError errno 22 / Windows error 433 (device not ready).
+    
+    On Windows, OSError(22, ..., None, 433) means ERROR_DEVICE_NOT_EXIST -- the COM
+    port is registered in the OS but the driver hasn't finished creating the device
+    object yet.  PySerial wraps this as SerialException with the original OSError
+    as __context__ (implicit chaining), so we check the full chain.
+    Windows error 21 (ERROR_NOT_READY) is also treated as transient.
+    """
+    if e is None:
+        return False
+    # Check the exception itself and the full chain (__cause__ and __context__)
+    for exc in (e, getattr(e, "__cause__", None), getattr(e, "__context__", None)):
+        if exc is None:
+            continue
+        if getattr(exc, "errno", None) == _ERRNO_HOTPLUG:
+            return True
+        # Windows-specific: winerror 433 = ERROR_DEVICE_NOT_EXIST, 21 = ERROR_NOT_READY
+        if getattr(exc, "winerror", None) in (433, 21):
+            return True
+    # Last resort: pyserial stringifies the wrapped OSError into the message
+    # e.g. "could not open port 'COM13': OSError(22, ...)"
+    try:
+        err_str = str(e)
+        if "OSError(22," in err_str or "winerror 433" in err_str.lower():
+            return True
+    except Exception:
+        pass
+    return False
+
+def _install_connect_fail_simulation(fail_count):
+    """Monkey-patch serial.Serial to simulate OSError 22 / winerror 433 for testing.
+    
+    The first `fail_count` calls to serial.Serial() will raise the exact same
+    exception chain a Windows user sees when the USB driver hasn't finished
+    initializing:  SerialException wrapping OSError(22, ..., None, 433).
+    
+    After `fail_count` failures the real serial.Serial is called normally.
+    
+    Usage:  python JumperlessWokwiBridge.py --test-connect-fail [N]
+            N defaults to 8 (enough to exhaust the 5 retries + 3 fallback ports).
+    """
+    _real_serial_init = serial.Serial.__init__
+    _fail_counter = {"remaining": fail_count}
+    
+    def _patched_init(self, *args, **kwargs):
+        if _fail_counter["remaining"] > 0:
+            _fail_counter["remaining"] -= 1
+            port_arg = args[0] if args else kwargs.get("port", "???")
+            # Build the exact exception chain the user sees on Windows:
+            # serial.SerialException whose __context__ is OSError(22, msg, None, 433)
+            # Using raise-from to set __cause__ (explicit chain), and the bare raise
+            # inside the except also sets __context__ (implicit chain) -- both paths
+            # are tested by _is_oserror22.
+            try:
+                raise OSError(22, "Simulated: device does not exist (ERROR_DEVICE_NOT_EXIST)", None, 433)
+            except OSError:
+                raise serial.SerialException(
+                    f"could not open port '{port_arg}': OSError(22, 'Simulated: device does not exist', None, 433)"
+                )
+        return _real_serial_init(self, *args, **kwargs)
+    
+    serial.Serial.__init__ = _patched_init
+    safe_print(f"[TEST MODE] serial.Serial will fail {fail_count} time(s) with simulated OSError 22", Fore.MAGENTA)
+
 def get_available_ports():
-    """Get list of available serial ports with cross-platform handling"""
+    """Get list of available serial ports with cross-platform handling.
+    
+    On Windows, comports() can briefly hold file handles (pyserial#309). Callers
+    should avoid rapid repeated calls; open_serial() adds delays when rescanned.
+    OSError 22 can occur when a device is plugged in during enumeration (hot-plug race).
+    """
     try:
         ports = serial.tools.list_ports.comports()
         port_list = []
         
         for port in ports:
-            # Get basic info
-            device = port.device
-            description = port.description
-            hwid = port.hwid
-            interface = getattr(port, 'interface', None)
+            try:
+                # Get basic info - each port access can raise OSError 22 if device is mid-enumeration
+                device = port.device
+                description = port.description
+                hwid = port.hwid
+                interface = getattr(port, 'interface', None)
+            except OSError as e:
+                if getattr(e, 'errno', None) == _ERRNO_HOTPLUG:
+                    # Device in flux during hot-plug, skip this port
+                    continue
+                raise
             
             # Debug: Check for additional attributes that might contain function info
             additional_attrs = {}
@@ -693,12 +788,26 @@ def get_available_ports():
                     attr_value = getattr(port, attr_name, None)
                     if attr_value:
                         additional_attrs[attr_name] = attr_value
-                except:
+                except OSError as oe:
+                    if getattr(oe, 'errno', None) != _ERRNO_HOTPLUG:
+                        raise
+                except Exception:
                     pass
             
             port_list.append((device, description, hwid, interface, additional_attrs))
         
+        # On Windows, encourage release of handles from comports() enumeration
+        if sys.platform == "win32":
+            import gc
+            gc.collect()
+        
         return port_list
+    except OSError as e:
+        if getattr(e, 'errno', None) == _ERRNO_HOTPLUG:
+            safe_print("Device list in flux (USB hot-plug). Please wait a moment and rescan.", Fore.YELLOW)
+            return []
+        safe_print(f"Error getting serial ports: {e}", Fore.RED)
+        return []
     except Exception as e:
         safe_print(f"Error getting serial ports: {e}", Fore.RED)
         return []
@@ -730,7 +839,559 @@ def is_jumperless_device(desc, pid, interface=None):
     """Check if device is a Jumperless device"""
     return (desc == "Jumperless" or 
             pid in ["ACAB", "1312"] or 
-            "jumperless" in desc.lower())
+            (desc and "jumperless" in desc.lower()))
+
+# ============================================================================
+# USB DESCRIPTOR-BASED PORT IDENTIFICATION
+# ============================================================================
+# These functions identify Jumperless CDC ports by reading USB interface string
+# descriptors from the OS, without opening any serial ports. This avoids the
+# timing/ordering issues that plague the ENQ-based detection on Windows.
+
+# Known USB interface names from the firmware (usb_interface_config.h USB_CDC_NAMES[])
+KNOWN_CDC_NAMES = {
+    "Jumperless Main":       "main",
+    "JL UART Passthrough":   "passthrough",
+    "JL Micropython REPL":   "python_repl",
+    "JL TUI":                "tui",
+    "JL Serial 3":           "serial3",
+}
+
+def get_usb_interface_string(port_obj):
+    """
+    Get the USB interface string descriptor for a serial port object.
+    Returns the string (e.g. "Jumperless Main") or None.
+    
+    - Linux: reads from pyserial's interface attribute (sysfs)
+    - macOS: reads from pyserial's interface attribute (IOKit)
+    - Windows: reads DEVPKEY_Device_BusReportedDeviceDesc via SetupAPI
+    """
+    # Try pyserial's built-in interface attribute first (Linux, macOS)
+    interface = getattr(port_obj, 'interface', None)
+    if interface:
+        return interface
+    
+    # Windows: read Bus Reported Device Description via SetupAPI
+    if sys.platform == "win32":
+        return _get_windows_bus_reported_desc(port_obj)
+    
+    return None
+
+def _get_windows_bus_reported_desc(port_obj):
+    """Read the USB interface string for a single port from the cached map."""
+    device_name = getattr(port_obj, 'device', '') or ''
+    if not device_name:
+        return None
+    port_info_map = _get_all_windows_port_info()
+    info = port_info_map.get(device_name.upper())
+    if info:
+        return info.get('bus_desc')
+    return None
+
+# Cache for Windows port info (populated once per detection cycle)
+_windows_port_info_cache = None
+
+def _invalidate_windows_port_cache():
+    """Call this at the start of each detection cycle to refresh the cache."""
+    global _windows_port_info_cache
+    _windows_port_info_cache = None
+
+def _get_all_windows_port_info():
+    """
+    Enumerate ALL COM port devices via SetupAPI in a single pass.
+    For each device, reads:
+      - COM port name (from device registry "PortName" value)
+      - Bus Reported Device Description (the USB interface string)
+      - Device Instance ID (contains MI_XX for interface number)
+    
+    Returns dict: { "COM7": {"bus_desc": "Jumperless Main", "instance_id": "USB\\VID_2E8A&PID_ACAB&MI_00\\...", "mi_number": 0}, ... }
+    
+    Results are cached for the duration of one detection cycle.
+    Falls back to registry-based MI_ extraction if SetupAPI fails.
+    """
+    global _windows_port_info_cache
+    if _windows_port_info_cache is not None:
+        return _windows_port_info_cache
+    
+    result = {}
+    
+    if sys.platform != "win32":
+        _windows_port_info_cache = result
+        return result
+    
+    # --- PRIMARY: Registry-based enumeration (simple, reliable, no ctypes) ---
+    try:
+        result = _registry_enumerate_usb_serial_ports()
+    except OSError as e:
+        if getattr(e, 'errno', None) == _ERRNO_HOTPLUG:
+            # Device list in flux during USB hot-plug, return empty (don't cache)
+            return {}
+        safe_print(f"Registry enumeration failed: {e}", Fore.YELLOW)
+    except Exception as e:
+        safe_print(f"Registry enumeration failed: {e}", Fore.YELLOW)
+    
+    # --- SECONDARY: SetupAPI enrichment (adds bus_desc for USB descriptor names) ---
+    # Even if registry already found ports, SetupAPI can add the Bus Reported
+    # Device Description which gives the actual USB interface string names.
+    try:
+        setupapi_result = _setupapi_enumerate_ports()
+        if setupapi_result:
+            for port_name, info in setupapi_result.items():
+                if port_name in result:
+                    # Merge: add bus_desc and any missing fields to existing entry
+                    for key, value in info.items():
+                        if key not in result[port_name] or key == 'bus_desc':
+                            result[port_name][key] = value
+                else:
+                    result[port_name] = info
+    except OSError as e:
+        if getattr(e, 'errno', None) == _ERRNO_HOTPLUG:
+            pass  # Device in flux during hot-plug, use registry result only
+        elif result:
+            safe_print(f"SetupAPI enrichment failed (non-critical): {e}", Fore.YELLOW)
+        else:
+            safe_print(f"SetupAPI enumeration also failed: {e}", Fore.YELLOW)
+    except Exception as e:
+        if result:
+            # Registry already worked, SetupAPI failure is non-critical
+            safe_print(f"SetupAPI enrichment failed (non-critical): {e}", Fore.YELLOW)
+        else:
+            safe_print(f"SetupAPI enumeration also failed: {e}", Fore.YELLOW)
+    
+    _windows_port_info_cache = result
+    return result
+
+def _setupapi_enumerate_ports():
+    """
+    SetupAPI-based COM port enumeration.
+    Uses proper unsigned bytes for GUIDs and explicit restype for handle functions.
+    """
+    import ctypes
+    from ctypes import wintypes
+    
+    result = {}
+
+    setupapi = ctypes.WinDLL("setupapi", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+    # Type aliases for readability
+    HDEVINFO = ctypes.c_void_p
+    HKEY = ctypes.c_void_p
+    PVOID = ctypes.c_void_p
+    PDEVINFO = ctypes.POINTER(ctypes.c_byte)  # opaque pointer to SP_DEVINFO_DATA
+
+    # --- Set FULL function signatures for proper 64-bit handle support ---
+    # Without argtypes, ctypes defaults to c_int for parameters,
+    # which truncates 64-bit handles and causes OverflowError.
+    
+    setupapi.SetupDiGetClassDevsW.argtypes = [PVOID, wintypes.LPCWSTR, wintypes.HWND, wintypes.DWORD]
+    setupapi.SetupDiGetClassDevsW.restype = HDEVINFO
+    
+    setupapi.SetupDiEnumDeviceInfo.argtypes = [HDEVINFO, wintypes.DWORD, PVOID]
+    setupapi.SetupDiEnumDeviceInfo.restype = wintypes.BOOL
+    
+    setupapi.SetupDiGetDeviceInstanceIdW.argtypes = [HDEVINFO, PVOID, wintypes.LPWSTR, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    setupapi.SetupDiGetDeviceInstanceIdW.restype = wintypes.BOOL
+    
+    setupapi.SetupDiOpenDevRegKey.argtypes = [HDEVINFO, PVOID, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD]
+    setupapi.SetupDiOpenDevRegKey.restype = HKEY
+    
+    setupapi.SetupDiGetDevicePropertyW.argtypes = [HDEVINFO, PVOID, PVOID, ctypes.POINTER(wintypes.ULONG), PVOID, wintypes.DWORD, ctypes.POINTER(wintypes.ULONG), wintypes.DWORD]
+    setupapi.SetupDiGetDevicePropertyW.restype = wintypes.BOOL
+    
+    setupapi.SetupDiDestroyDeviceInfoList.argtypes = [HDEVINFO]
+    setupapi.SetupDiDestroyDeviceInfoList.restype = wintypes.BOOL
+    
+    advapi32.RegQueryValueExW.argtypes = [HKEY, wintypes.LPCWSTR, wintypes.LPDWORD, wintypes.LPDWORD, PVOID, wintypes.LPDWORD]
+    advapi32.RegQueryValueExW.restype = wintypes.LONG
+    
+    advapi32.RegCloseKey.argtypes = [HKEY]
+    advapi32.RegCloseKey.restype = wintypes.LONG
+
+    # Constants
+    DIGCF_PRESENT = 0x02
+    DICS_FLAG_GLOBAL = 0x01
+    DIREG_DEV = 0x01
+    KEY_READ = 0x20019
+
+    # --- DEVPKEY_Device_BusReportedDeviceDesc ---
+    # GUID: {540b947e-8b40-45bc-a8a2-6a0b894cbda2}, pid=4
+    class DEVPROPKEY(ctypes.Structure):
+        _fields_ = [
+            ("fmtid", ctypes.c_ubyte * 16),
+            ("pid", wintypes.ULONG),
+        ]
+
+    devpkey = DEVPROPKEY()
+    devpkey.fmtid[:] = [
+        0x7e, 0x94, 0x0b, 0x54,
+        0x40, 0x8b, 0xbc, 0x45,
+        0xa8, 0xa2, 0x6a, 0x0b,
+        0x89, 0x4c, 0xbd, 0xa2,
+    ]
+    devpkey.pid = 4
+
+    class SP_DEVINFO_DATA(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("ClassGuid", ctypes.c_ubyte * 16),
+            ("DevInst", wintypes.DWORD),
+            ("Reserved", ctypes.POINTER(wintypes.ULONG)),
+        ]
+
+    # "Ports" device setup class GUID: {4D36E978-E325-11CE-BFC1-08002BE10318}
+    ports_class_guid = (ctypes.c_ubyte * 16)(
+        0x78, 0xe9, 0x36, 0x4d,
+        0x25, 0xe3, 0xce, 0x11,
+        0xbf, 0xc1, 0x08, 0x00,
+        0x2b, 0xe1, 0x03, 0x18,
+    )
+
+    hdi = setupapi.SetupDiGetClassDevsW(
+        ctypes.byref(ports_class_guid),
+        None, None, DIGCF_PRESENT,
+    )
+    # INVALID_HANDLE_VALUE is (HANDLE)-1 which is 0xFFFFFFFF on 32-bit
+    # or 0xFFFFFFFFFFFFFFFF on 64-bit. c_void_p restype returns a Python int.
+    # Also check for 0 (null pointer) which some error paths may return.
+    if not hdi or hdi == ctypes.c_void_p(-1).value:
+        safe_print("SetupAPI: SetupDiGetClassDevsW failed", Fore.YELLOW)
+        return result
+
+    try:
+        devinfo = SP_DEVINFO_DATA()
+        devinfo.cbSize = ctypes.sizeof(SP_DEVINFO_DATA)
+
+        idx = 0
+        while setupapi.SetupDiEnumDeviceInfo(hdi, idx, ctypes.byref(devinfo)):
+            idx += 1
+            port_entry = {}
+
+            # --- Read COM port name from device registry ---
+            port_name = None
+            try:
+                hkey = setupapi.SetupDiOpenDevRegKey(
+                    hdi, ctypes.byref(devinfo),
+                    DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ,
+                )
+                # HKEY return: None or INVALID_HANDLE_VALUE means failure
+                if hkey is not None and hkey != ctypes.c_void_p(-1).value:
+                    try:
+                        name_buf = ctypes.create_unicode_buffer(256)
+                        name_size = wintypes.DWORD(ctypes.sizeof(name_buf))
+                        name_type = wintypes.DWORD()
+                        
+                        ret = advapi32.RegQueryValueExW(
+                            hkey,
+                            "PortName",
+                            None,
+                            ctypes.byref(name_type),
+                            name_buf,
+                            ctypes.byref(name_size),
+                        )
+                        if ret == 0 and name_buf.value:
+                            port_name = name_buf.value
+                    finally:
+                        advapi32.RegCloseKey(hkey)
+            except Exception:
+                pass
+
+            if not port_name or not port_name.upper().startswith('COM'):
+                continue
+
+            # --- Read device instance ID (contains MI_XX) ---
+            inst_buf = ctypes.create_unicode_buffer(512)
+            if setupapi.SetupDiGetDeviceInstanceIdW(
+                hdi, ctypes.byref(devinfo), inst_buf, 512, None
+            ):
+                instance_id = inst_buf.value
+                port_entry['instance_id'] = instance_id
+                
+                inst_upper = instance_id.upper()
+                if 'MI_' in inst_upper:
+                    try:
+                        mi_pos = inst_upper.find('MI_')
+                        mi_num = int(inst_upper[mi_pos + 3:mi_pos + 5])
+                        port_entry['mi_number'] = mi_num
+                    except (ValueError, IndexError):
+                        pass
+
+            # --- Read Bus Reported Device Description ---
+            prop_type = wintypes.ULONG()
+            prop_buf = ctypes.create_unicode_buffer(256)
+            prop_size = wintypes.ULONG()
+            
+            try:
+                ret = setupapi.SetupDiGetDevicePropertyW(
+                    hdi,
+                    ctypes.byref(devinfo),
+                    ctypes.byref(devpkey),
+                    ctypes.byref(prop_type),
+                    ctypes.cast(prop_buf, ctypes.POINTER(ctypes.c_ubyte)),
+                    ctypes.sizeof(prop_buf),
+                    ctypes.byref(prop_size),
+                    0,
+                )
+                if ret and prop_buf.value:
+                    port_entry['bus_desc'] = prop_buf.value
+            except Exception:
+                pass
+
+            if port_entry:
+                result[port_name.upper()] = port_entry
+
+    finally:
+        setupapi.SetupDiDestroyDeviceInfoList(hdi)
+
+    if result:
+        safe_print(f"SetupAPI: found {len(result)} COM port(s)", Fore.CYAN)
+    else:
+        safe_print("SetupAPI: no COM ports found (will try registry fallback)", Fore.YELLOW)
+    
+    return result
+
+def _registry_enumerate_usb_serial_ports():
+    """
+    Fallback: enumerate USB serial ports via the Windows registry directly.
+    
+    Walks HKLM\\SYSTEM\\CurrentControlSet\\Enum\\USB to find all USB composite
+    device interfaces, reads their PortName and extracts MI_ from the key path.
+    
+    This uses only the standard library 'winreg' module -- no ctypes needed.
+    Does NOT read Bus Reported Description (not in the registry), but does
+    get the MI_ number which is enough for CDC index mapping.
+    
+    Returns dict: { "COM7": {"mi_number": 0, "instance_id": "USB\\VID_2E8A&PID_ACAB&MI_00\\..."}, ... }
+    """
+    import winreg
+    
+    result = {}
+    
+    try:
+        usb_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Enum\USB")
+    except OSError:
+        return result
+    
+    try:
+        # Enumerate USB device ID subkeys (e.g. "VID_2E8A&PID_ACAB&MI_00")
+        dev_idx = 0
+        while True:
+            try:
+                device_id = winreg.EnumKey(usb_key, dev_idx)
+                dev_idx += 1
+            except OSError:
+                break
+            
+            # We only care about entries with MI_ (composite device interfaces)
+            device_id_upper = device_id.upper()
+            mi_number = None
+            if 'MI_' in device_id_upper:
+                try:
+                    mi_pos = device_id_upper.find('MI_')
+                    mi_number = int(device_id_upper[mi_pos + 3:mi_pos + 5])
+                except (ValueError, IndexError):
+                    pass
+            
+            # Enumerate instance subkeys under this device ID
+            try:
+                dev_id_key = winreg.OpenKey(usb_key, device_id)
+            except OSError:
+                continue
+            
+            try:
+                inst_idx = 0
+                while True:
+                    try:
+                        instance_id = winreg.EnumKey(dev_id_key, inst_idx)
+                        inst_idx += 1
+                    except OSError:
+                        break
+                    
+                    # Try to read PortName from Device Parameters
+                    try:
+                        params_key = winreg.OpenKey(
+                            dev_id_key,
+                            f"{instance_id}\\Device Parameters"
+                        )
+                        try:
+                            port_name, _ = winreg.QueryValueEx(params_key, "PortName")
+                            if port_name and port_name.upper().startswith('COM'):
+                                entry = {
+                                    'instance_id': f"USB\\{device_id}\\{instance_id}",
+                                }
+                                if mi_number is not None:
+                                    entry['mi_number'] = mi_number
+                                result[port_name.upper()] = entry
+                        finally:
+                            winreg.CloseKey(params_key)
+                    except OSError:
+                        pass
+            finally:
+                winreg.CloseKey(dev_id_key)
+    finally:
+        winreg.CloseKey(usb_key)
+    
+    if result:
+        safe_print(f"Registry: found {len(result)} USB serial port(s)", Fore.CYAN)
+    
+    return result
+
+def cdc_index_from_hwid(hwid):
+    """
+    Extract CDC interface index from MI_XX in a Windows HWID string.
+    Each CDC function uses 2 USB interfaces (control + data), so MI_ / 2 = CDC index.
+    Example: MI_00 -> CDC 0, MI_02 -> CDC 1, MI_04 -> CDC 2, MI_06 -> CDC 3
+    Returns int CDC index, or None if MI_ not found.
+    """
+    if not hwid:
+        return None
+    hwid_upper = hwid.upper()
+    if 'MI_' in hwid_upper:
+        try:
+            mi_pos = hwid_upper.find('MI_')
+            mi_num = int(hwid_upper[mi_pos + 3:mi_pos + 5])
+            return mi_num // 2
+        except (ValueError, IndexError):
+            pass
+    return None
+
+def sort_com_ports_numerically(port_names):
+    """
+    Sort COM port names numerically instead of lexicographically.
+    'COM3, COM7, COM10, COM12' instead of 'COM10, COM12, COM3, COM7'.
+    Falls back to standard sort for non-COM port names (Linux/macOS).
+    """
+    def com_sort_key(name):
+        # Try to extract numeric part from COMn
+        upper = name.upper()
+        if upper.startswith('COM'):
+            try:
+                return (0, int(upper[3:]))
+            except ValueError:
+                pass
+        # Non-COM ports: sort normally
+        return (1, name)
+    return sorted(port_names, key=com_sort_key)
+
+def identify_ports_by_usb_descriptor(jumperless_ports):
+    """
+    Identify all Jumperless CDC ports by reading USB interface string descriptors
+    from the OS. No serial ports are opened -- purely reads OS-level USB metadata.
+    
+    Returns dict: {port_name: usb_interface_string} or empty dict if not available.
+    """
+    port_map = {}
+    
+    # On Windows, use the single-pass SetupAPI enumeration for efficiency and reliability
+    if sys.platform == "win32":
+        win_info = _get_all_windows_port_info()
+        for jl_port_name, desc, hwid, interface, attrs in jumperless_ports:
+            info = win_info.get(jl_port_name.upper())
+            if info and info.get('bus_desc'):
+                port_map[jl_port_name] = info['bus_desc']
+                safe_print(f"  USB descriptor: {jl_port_name} = \"{info['bus_desc']}\"", Fore.GREEN)
+        return port_map
+    
+    # On Linux/macOS, use pyserial's interface attribute
+    try:
+        all_system_ports = serial.tools.list_ports.comports()
+    except (OSError, Exception):
+        return port_map
+    
+    for port_obj in all_system_ports:
+        try:
+            port_device = port_obj.device
+        except OSError as oe:
+            if getattr(oe, 'errno', None) == _ERRNO_HOTPLUG:
+                continue  # Device in flux during hot-plug
+            raise
+        for jl_port_name, desc, hwid, interface, attrs in jumperless_ports:
+            if port_device == jl_port_name:
+                try:
+                    usb_name = get_usb_interface_string(port_obj)
+                except OSError as oe:
+                    if getattr(oe, 'errno', None) == _ERRNO_HOTPLUG:
+                        break  # Device in flux, skip this port
+                    raise
+                if usb_name:
+                    port_map[jl_port_name] = usb_name
+                    safe_print(f"  USB descriptor: {jl_port_name} = \"{usb_name}\"", Fore.GREEN)
+                break
+    
+    return port_map
+
+def identify_ports_by_interface_number(jumperless_ports):
+    """
+    Identify CDC ports by their USB interface number, using all available sources:
+      - Windows: MI_XX from SetupAPI device instance ID (most reliable)
+      - Windows fallback: MI_XX from pyserial HWID string
+      - macOS:   port name (e.g. /dev/cu.usbmodemJLV5port1 -> interface 1)
+      - Linux:   pyserial interface attribute, or port name
+    
+    Each CDC function uses 2 USB interfaces (control + data), so:
+      interface_num // 2 = CDC index
+      CDC 0 = interfaces 0,1  CDC 1 = interfaces 2,3  CDC 2 = interfaces 4,5  etc.
+    
+    Returns dict: {port_name: cdc_name_string} or empty dict.
+    """
+    # Known CDC names in order (must match firmware USB_CDC_NAMES[])
+    cdc_names_ordered = [
+        "Jumperless Main",
+        "JL UART Passthrough",
+        "JL Micropython REPL",
+        "JL TUI",
+        "JL Serial 3",
+    ]
+    
+    port_map = {}
+    
+    # On Windows, get MI_ numbers from SetupAPI (reliable source)
+    win_info = _get_all_windows_port_info() if sys.platform == "win32" else {}
+    
+    for port_info in jumperless_ports:
+        port_name, desc, hwid, interface, attrs = port_info
+        cdc_idx = None
+        source = ""
+        
+        # Method 1: MI_ from SetupAPI device instance ID (Windows, most reliable)
+        if sys.platform == "win32":
+            info = win_info.get(port_name.upper())
+            if info and 'mi_number' in info:
+                mi_num = info['mi_number']
+                cdc_idx = mi_num // 2
+                source = f"MI_{mi_num:02d} (SetupAPI)"
+        
+        # Method 2: MI_ from pyserial HWID string (Windows fallback)
+        if cdc_idx is None:
+            mi_idx = cdc_index_from_hwid(hwid)
+            if mi_idx is not None:
+                cdc_idx = mi_idx
+                source = f"MI_{mi_idx*2:02d} (hwid)"
+        
+        # Method 3: Use extract_port_interface_number (macOS port names, Linux interface attr)
+        if cdc_idx is None:
+            iface_num, _ = extract_port_interface_number(port_info)
+            if iface_num < 99:  # 99 is the "not found" default
+                cdc_idx = iface_num // 2
+                source = f"interface {iface_num}"
+        
+        if cdc_idx is not None and cdc_idx < len(cdc_names_ordered):
+            port_map[port_name] = cdc_names_ordered[cdc_idx]
+            safe_print(f"  Interface mapping: {port_name} ({source}) -> CDC{cdc_idx} = \"{cdc_names_ordered[cdc_idx]}\"", Fore.GREEN)
+    
+    return port_map
+
+def find_port_by_function(port_map, *keywords):
+    """
+    Find a port name in port_map whose function description contains any of the keywords.
+    Returns port_name or None.
+    """
+    for port_name, func_desc in port_map.items():
+        func_lower = func_desc.lower()
+        for kw in keywords:
+            if kw.lower() in func_lower:
+                return port_name
+    return None
 
 def extract_port_interface_number(port_info):
     """
@@ -1052,38 +1713,86 @@ def get_all_port_functions(main_port_name, all_jumperless_ports):
     return port_functions
 
 def organize_jumperless_ports(main_port_name, all_jumperless_ports, port_functions):
-    """Organize ports by function with fallback to numerical order"""
+    """Organize ports by function with fallback to numerical order.
+    
+    Tries three methods to map CDC numbers to physical port names:
+      1. USB descriptor / MI_ matching (most reliable, especially on Windows)
+      2. Main port name matching for CDC0
+      3. Interface-number-sorted port list fallback (numerically sorted, not lexicographic)
+    """
     organized_ports = {}
     
-    # First, assign ports based on ENQ query results
+    # Build a CDC-index-to-port map from MI_ numbers
+    mi_port_map = {}  # {cdc_index: port_name}
+    
+    # On Windows, use SetupAPI device instance IDs (pyserial hwid doesn't contain MI_)
+    if sys.platform == "win32":
+        win_info = _get_all_windows_port_info()
+        for port_name, desc, hwid, interface, additional_attrs in all_jumperless_ports:
+            info = win_info.get(port_name.upper())
+            if info and 'mi_number' in info:
+                cdc_idx = info['mi_number'] // 2
+                mi_port_map[cdc_idx] = port_name
+    else:
+        # On other platforms, try pyserial hwid or port name extraction
+        for port_name, desc, hwid, interface, additional_attrs in all_jumperless_ports:
+            cdc_idx = cdc_index_from_hwid(hwid)
+            if cdc_idx is not None:
+                mi_port_map[cdc_idx] = port_name
+    
+    # Also try USB descriptor matching
+    usb_desc_map = identify_ports_by_usb_descriptor(all_jumperless_ports)
+    
+    # Assign ports based on ENQ query results
     for cdc_num, function_desc in port_functions.items():
-        # Try to find which physical port corresponds to this CDC number
         port_assigned = False
         
-        # Method 1: Try to find the port by querying it individually
-        for port_name, desc, hwid, interface, additional_attrs in all_jumperless_ports:
-            if port_name == main_port_name and 'main' in function_desc.lower():
-                organized_ports[port_name] = function_desc
-                port_assigned = True
-                break
+        # Method 1: Use MI_ HWID mapping (most reliable on Windows)
+        if cdc_num in mi_port_map:
+            port_name = mi_port_map[cdc_num]
+            organized_ports[port_name] = function_desc
+            port_assigned = True
+            if debugWokwi:
+                safe_print(f"MI_ match: CDC{cdc_num} -> {port_name} ({function_desc})", Fore.GREEN)
         
+        # Method 2: Use USB descriptor matching
         if not port_assigned:
-            # Method 2: Fallback to numerical order mapping
-            # Sort ports by name to get consistent ordering
-            sorted_ports = sorted([p[0] for p in all_jumperless_ports])
+            for port_name, usb_name in usb_desc_map.items():
+                if usb_name.lower().strip() == function_desc.lower().strip():
+                    organized_ports[port_name] = function_desc
+                    port_assigned = True
+                    if debugWokwi:
+                        safe_print(f"USB desc match: CDC{cdc_num} -> {port_name} ({function_desc})", Fore.GREEN)
+                    break
+        
+        # Method 3: Match main port name for CDC0
+        if not port_assigned:
+            for port_name, desc, hwid, interface, additional_attrs in all_jumperless_ports:
+                if port_name == main_port_name and 'main' in function_desc.lower():
+                    organized_ports[port_name] = function_desc
+                    port_assigned = True
+                    break
+        
+        # Method 4: Fallback to interface-number-sorted mapping
+        # Use extract_port_interface_number for proper ordering instead of
+        # lexicographic sort (which breaks on Windows: COM10 < COM3)
+        if not port_assigned:
+            sorted_ports = [p[0] for p in sorted(all_jumperless_ports, key=extract_port_interface_number)]
             
             if cdc_num < len(sorted_ports):
                 port_name = sorted_ports[cdc_num]
-                organized_ports[port_name] = function_desc
-                if debugWokwi:
-                    safe_print(f"Fallback: CDC{cdc_num} -> {port_name} ({function_desc})", Fore.YELLOW)
+                if port_name not in organized_ports:
+                    organized_ports[port_name] = function_desc
+                    if debugWokwi:
+                        safe_print(f"Interface-sort fallback: CDC{cdc_num} -> {port_name} ({function_desc})", Fore.YELLOW)
     
-    # If we still don't have enough ports mapped, map remaining ports in order
+    # Map any remaining unmapped ports
     unmapped_ports = [p[0] for p in all_jumperless_ports if p[0] not in organized_ports]
     if unmapped_ports:
-        safe_print(f"Mapping {len(unmapped_ports)} remaining ports in numerical order", Fore.CYAN)
+        safe_print(f"Mapping {len(unmapped_ports)} remaining ports in interface order", Fore.CYAN)
         
-        for i, port_name in enumerate(sorted(unmapped_ports)):
+        # Sort numerically (handles COM ports correctly)
+        for i, port_name in enumerate(sort_com_ports_numerically(unmapped_ports)):
             if port_name == main_port_name:
                 organized_ports[port_name] = "Jumperless Main"
             else:
@@ -1095,7 +1804,7 @@ def choose_arduino_port(organized_ports, main_port_name):
     """Choose the best port for Arduino programming"""
     # Look for specific Arduino-friendly functions in order of preference
     arduino_preferences = [
-        "passthrough", "jl passthrough", "arduino", "serial"
+        "passthrough", "jl passthrough", "jl uart", "uart passthrough", "arduino", "serial"
     ]
     
     for port_name, function_desc in organized_ports.items():
@@ -1191,6 +1900,7 @@ def manual_port_selection():
                 safe_print(f"Connecting to {new_port_name}...", Fore.CYAN)
                 with serial_lock:
                     ser = serial.Serial(new_port_name, 115200, timeout=1)
+                    _set_serial_buffers(ser)
                     serialconnected = 1
                     portName = new_port_name
                     portSelected = True
@@ -1231,174 +1941,538 @@ def manual_port_selection():
         return False
 
 def open_serial():
-    """Open serial connection with simplified port detection"""
+    """Open serial connection with robust cross-platform port detection.
+    
+    Detection strategy (in order):
+      1. USB descriptor strings  -- reads OS-level USB metadata, no ports opened
+      2. MI_ HWID mapping        -- parses Windows HWID for interface number
+      3. ENQ serial query         -- opens ports to query firmware (legacy fallback)
+      4. Manual selection         -- user picks from the list
+    """
     global portName, ser, arduinoPort, serialconnected, portSelected, updateInProgress
     
-    portSelected = False
-    
-    safe_print("\nScanning for serial ports...\n", Fore.CYAN)
-    
-    while not portSelected and updateInProgress == 0:
-        ports = get_available_ports()
+    # Wrap entire function in try/except to prevent any crash
+    try:
+        portSelected = False
+        jumperless_ports = []  # Initialized here so it's available in fallback section after while loop
+        prev_had_no_ports = False  # Track rescan-after-empty to add Windows delay
+        rescanned_from_empty = False  # True once we go from no-ports -> found-ports (persists to open phase)
+        first_scan = True  # Track first scan for initial delay
         
-        if not ports:
-            safe_print("No serial ports found. Please connect your Jumperless.", Fore.RED)
-            time.sleep(2)
-            continue
+        safe_print("\nScanning for serial ports...\n", Fore.CYAN)
         
-        # Sort ports by interface number first (for Windows/Unix compatibility), then by port name
-        # This ensures deterministic ordering: interface 0, 1, 2... regardless of COM port assignment
-        ports = sorted(ports, key=extract_port_interface_number)
+        # First-run delay: Windows needs time for USB enumeration to stabilize
+        # This prevents crashes when device was disconnected at app start
+        if sys.platform == "win32" and first_scan:
+            time.sleep(1.5)
+            first_scan = False
         
-        # Display all ports with numbered selection
-        display_ports_with_selection(ports)
-        
-        # Find all Jumperless devices
-        jumperless_ports = []
-        other_ports = []
-        
-        for port, desc, hwid, interface, additional_attrs in ports:
-            vid, pid = parse_hardware_id(hwid, desc)
-            
-            if is_jumperless_device(desc, pid, interface):
-                jumperless_ports.append((port, desc, hwid, interface, additional_attrs))
-            else:
-                other_ports.append((port, desc, hwid, interface, additional_attrs))
-        
-        if not jumperless_ports:
-            safe_print("No Jumperless devices found.", Fore.YELLOW)
-            # safe_print("\nPlease manually select a port from the list above.", Fore.CYAN)
-            
-            # Add port options to command history for easy selection
-            original_history_length = 0
-            if READLINE_AVAILABLE:
-                try:
-                    # Record original history length before adding entries
-                    original_history_length = readline.get_current_history_length()
-                    
-                    for i, (port, desc, hwid, interface, additional_attrs) in enumerate(ports, 1):
-                        # Add number with port description
-                        desc_entry = f"{i}: {port} [{desc}]"
-                        readline.add_history(desc_entry)
-                except Exception:
-                    pass
-            
-            selection = input(f"Enter port number {Fore.YELLOW}(1-{len(ports)}){Fore.RESET} or 'r' to rescan: ").strip()
-            
-            # Remove added history entries by truncating back to original length
-            if READLINE_AVAILABLE and original_history_length >= 0:
-                try:
-                    current_length = readline.get_current_history_length()
-                    # Remove all entries added after the original length
-                    while current_length > original_history_length:
-                        readline.remove_history_item(current_length - 1)
-                        current_length -= 1
-                except Exception:
-                    pass
-            
-            if selection.lower() == 'r':
-                continue
-            
+        while not portSelected and updateInProgress == 0:
             try:
-                # Handle both plain numbers and "number: port [desc]" format
-                if ':' in selection:
-                    # Extract number from "1: /dev/ttyUSB0 [desc]" format
-                    selection_num = selection.split(':')[0].strip()
-                else:
-                    selection_num = selection
+                # Windows: After "no ports" rescan, wait before enumerating again. PySerial's comports()
+                # can hold file handles briefly; rapid rescans cause PermissionError / LIBUSB_ERROR_ACCESS
+                # when opening later. See pyserial/pyserial#309.
+                if prev_had_no_ports and sys.platform == "win32":
+                    time.sleep(2)
                 
-                port_idx = int(selection_num) - 1
-                if 0 <= port_idx < len(ports):
-                    portName = ports[port_idx][0]
-                    portSelected = True
-                    safe_print(f"Selected port: {portName}", Fore.GREEN)
-            except (ValueError, IndexError):
-                safe_print("Invalid selection. Please try again.", Fore.RED)
-                continue
-        else:
-            # Step 1: Find the main port using '?' query
-            safe_print(f"\nFound {len(jumperless_ports)} Jumperless device(s). Finding main port...", Fore.CYAN)
-            
-            main_port_name = find_main_port(jumperless_ports)
-            
-            # if not main_port_name:
+                # Invalidate Windows SetupAPI cache at the start of each scan cycle
+                try:
+                    _invalidate_windows_port_cache()
+                except Exception:
+                    pass  # Cache invalidation failure shouldn't stop us
                 
-            #     # time.sleep(0.5)
-            #     safe_print("Trying to find main port with force_quit_python=True", Fore.YELLOW)
-            #     main_port_name = find_main_port(jumperless_ports, force_quit_python=True)
+                ports = get_available_ports()
                 
-                    
-            
-            if not main_port_name:
-                safe_print("Could not find main port automatically.", Fore.YELLOW)
-                
-                # Auto-select the lowest numbered (first) Jumperless port
-                # Since we sorted by interface number, this will be the most deterministic choice
-                if jumperless_ports:
-                    portName = jumperless_ports[0][0]
-                    portSelected = True
-                    safe_print(f"Auto-selected lowest numbered Jumperless port: {portName}", Fore.GREEN)
-                    safe_print("If this is incorrect, use the 'port' command to manually select a different port.", Fore.CYAN)
-                    
-                    # Try to get port functions even though auto-detection failed
+                # Sort ports and find Jumperless devices (unified path for no ports / no jumperless)
+                if ports:
                     try:
-                        port_functions = get_all_port_functions(portName, jumperless_ports)
-                        organized_ports = organize_jumperless_ports(portName, jumperless_ports, port_functions)
-                        arduinoPort = choose_arduino_port(organized_ports, portName)
-                        
-                        if arduinoPort:
-                            safe_print(f"Arduino programming port: {arduinoPort}", Fore.GREEN)
+                        ports = sorted(ports, key=extract_port_interface_number)
+                        display_ports_with_selection(ports)
                     except Exception as e:
                         if debugWokwi:
-                            safe_print(f"Could not query port functions: {e}", Fore.YELLOW)
-                        # Continue anyway with just the main port selected
-                else:
-                    safe_print("No Jumperless ports found.", Fore.RED)
+                            safe_print(f"Error sorting/displaying ports: {e}", Fore.YELLOW)
+                        # Continue with unsorted ports
+                
+                jumperless_ports = []
+                other_ports = []
+                for port, desc, hwid, interface, additional_attrs in (ports or []):
+                    try:
+                        vid, pid = parse_hardware_id(hwid, desc)
+                        if is_jumperless_device(desc, pid, interface):
+                            jumperless_ports.append((port, desc, hwid, interface, additional_attrs))
+                        else:
+                            other_ports.append((port, desc, hwid, interface, additional_attrs))
+                    except Exception as e:
+                        # Skip ports that cause errors during parsing
+                        if debugWokwi:
+                            safe_print(f"Skipping port {port}: {e}", Fore.YELLOW)
+                        continue
+                
+                if not jumperless_ports:
+                    # Unified path: no ports or no Jumperless - wait for user to trigger rescan
+                    prev_had_no_ports = True  # Next rescan will add Windows delay to release handles
+                    if not ports:
+                        safe_print("No serial ports found. Please connect your Jumperless.", Fore.RED)
+                        prompt = "Press Enter to rescan... "
+                    else:
+                        safe_print("No Jumperless devices found. Connect your Jumperless or select a port manually.", Fore.YELLOW)
+                        prompt = f"Enter port number {Fore.YELLOW}(1-{len(ports)}){Fore.RESET} or 'r' to rescan: "
+                    
+                    try:
+                        selection = input(prompt).strip()
+                    except EOFError:
+                        time.sleep(2)
+                        continue
+                    
+                    if selection == '' or selection.lower() == 'r':
+                        continue
+                    
+                    # Port selection (only when we have ports)
+                    if ports:
+                        try:
+                            if ':' in selection:
+                                selection_num = selection.split(':')[0].strip()
+                            else:
+                                selection_num = selection
+                            port_idx = int(selection_num) - 1
+                            if 0 <= port_idx < len(ports):
+                                portName = ports[port_idx][0]
+                                portSelected = True
+                                safe_print(f"Selected port: {portName}", Fore.GREEN)
+                            else:
+                                safe_print("Invalid port number. Try again.", Fore.YELLOW)
+                        except (ValueError, IndexError):
+                            safe_print("Invalid selection. Try again.", Fore.YELLOW)
                     continue
-            else:
-                # Step 2: Query for all port functions
-                safe_print(f"Main port found: {main_port_name}", Fore.GREEN)
-                
-                port_functions = get_all_port_functions(main_port_name, jumperless_ports)
-                
-                # Step 3: Organize ports by function
-                organized_ports = organize_jumperless_ports(main_port_name, jumperless_ports, port_functions)
-                
-                # Step 4: Set main communication port
-                portName = main_port_name
-                portSelected = True
-                
-                # Step 5: Choose Arduino port
-                arduinoPort = choose_arduino_port(organized_ports, main_port_name)
-                
-                # Display results
-                safe_print(f"\nPort assignments:", Fore.CYAN)
-                safe_print(f"Main communication: {portName} ({organized_ports.get(portName, 'Unknown')})", Fore.GREEN)
-                
-                if arduinoPort:
-                    safe_print(f"Arduino programming: {arduinoPort} ({organized_ports.get(arduinoPort, 'Unknown')})", Fore.GREEN)
                 else:
-                    safe_print("Arduino programming: Not available", Fore.YELLOW)
-                
+                    if prev_had_no_ports:
+                        rescanned_from_empty = True  # Remember we came from no-ports (used for pre-open delay)
+                    prev_had_no_ports = False  # We have ports; no delay needed on next iteration
+                    # =============================================================
+                    # STRATEGY 1: USB descriptor-based identification (best, no port opens)
+                    # =============================================================
+                    safe_print(f"\nFound {len(jumperless_ports)} Jumperless device(s). Identifying ports...", Fore.CYAN)
+                    
+                    port_map = {}
+                    try:
+                        port_map = identify_ports_by_usb_descriptor(jumperless_ports)
+                    except Exception as e:
+                        if debugWokwi:
+                            safe_print(f"USB descriptor identification failed: {e}", Fore.YELLOW)
+                        port_map = {}
+                    
+                    if port_map:
+                        safe_print(f"Identified {len(port_map)} port(s) via USB descriptors", Fore.GREEN)
+                    
+                    # =============================================================
+                    # STRATEGY 2: Interface number mapping (cross-platform, no port opens)
+                    # Uses MI_ on Windows, port name on macOS, interface attr on Linux
+                    # =============================================================
+                    if len(port_map) < len(jumperless_ports):
+                        try:
+                            safe_print("Trying interface number mapping...", Fore.CYAN)
+                            iface_map = identify_ports_by_interface_number(jumperless_ports)
+                            # Merge: only fill in ports that weren't found by descriptor
+                            for pn, func in iface_map.items():
+                                if pn not in port_map:
+                                    port_map[pn] = func
+                        except Exception as e:
+                            if debugWokwi:
+                                safe_print(f"Interface number mapping failed: {e}", Fore.YELLOW)
+                    
+                    if port_map:
+                        safe_print(f"Identified {len(port_map)}/{len(jumperless_ports)} port function(s)", Fore.GREEN)
+                    else:
+                        safe_print("No port functions identified via USB metadata", Fore.YELLOW)
+                    
+                    # Check if we got a complete picture from descriptor/MI_ methods
+                    main_port_name = find_port_by_function(port_map, "main")
+                    
+                    if main_port_name:
+                        # --- Descriptor-based detection succeeded ---
+                        safe_print(f"Main port found: {main_port_name}", Fore.GREEN)
+                        
+                        portName = main_port_name
+                        portSelected = True
+                        
+                        # Build organized_ports from port_map
+                        organized_ports = dict(port_map)
+                        
+                        # Label any ports that weren't identified
+                        for pn, desc, hwid, interface, attrs in jumperless_ports:
+                            if pn not in organized_ports:
+                                organized_ports[pn] = f"Jumperless Unknown ({pn})"
+                        
+                        arduinoPort = choose_arduino_port(organized_ports, main_port_name)
+                        
+                        # NOTE: Firmware version query is deferred until after the final
+                        # connection is established (see _query_firmware_version below).
+                        # Opening a separate port just for the version query causes the
+                        # firmware to enter menu mode, resulting in repeated menu displays.
+                        
+                        # Display results
+                        safe_print(f"\nPort assignments:", Fore.CYAN)
+                        safe_print(f"Main communication: {portName} ({organized_ports.get(portName, 'Unknown')})", Fore.GREEN)
+                        
+                        if arduinoPort:
+                            safe_print(f"Arduino programming: {arduinoPort} ({organized_ports.get(arduinoPort, 'Unknown')})", Fore.GREEN)
+                        else:
+                            safe_print("Arduino programming: Not available", Fore.YELLOW)
+                        
+                        if debugWokwi:
+                            safe_print(f"\nAll detected ports:", Fore.CYAN)
+                            for pn, function_desc in organized_ports.items():
+                                safe_print(f"  {pn}: {function_desc}", Fore.BLUE)
+                    else:
+                        # =============================================================
+                        # STRATEGY 3: ENQ serial query fallback (legacy method)
+                        # =============================================================
+                        safe_print("USB descriptor detection unavailable, falling back to serial query...", Fore.YELLOW)
+                        
+                        main_port_name = find_main_port(jumperless_ports)
+                        
+                        # Windows: small delay after find_main_port closes the port
+                        if sys.platform == "win32":
+                            time.sleep(0.3)
+                        
+                        if not main_port_name:
+                            safe_print("Could not find main port automatically.", Fore.YELLOW)
+                            
+                            if jumperless_ports:
+                                portName = jumperless_ports[0][0]
+                                portSelected = True
+                                safe_print(f"Auto-selected first Jumperless port: {portName}", Fore.GREEN)
+                                safe_print("If this is incorrect, use the 'port' command to manually select a different port.", Fore.CYAN)
+                                
+                                try:
+                                    port_functions = get_all_port_functions(portName, jumperless_ports)
+                                    organized_ports = organize_jumperless_ports(portName, jumperless_ports, port_functions)
+                                    arduinoPort = choose_arduino_port(organized_ports, portName)
+                                    
+                                    if arduinoPort:
+                                        safe_print(f"Arduino programming port: {arduinoPort}", Fore.GREEN)
+                                except Exception as e:
+                                    if debugWokwi:
+                                        safe_print(f"Could not query port functions: {e}", Fore.YELLOW)
+                            else:
+                                safe_print("No Jumperless ports found.", Fore.RED)
+                                continue
+                        else:
+                            safe_print(f"Main port found: {main_port_name}", Fore.GREEN)
+                            
+                            # Windows: delay before reopening the port we just closed
+                            if sys.platform == "win32":
+                                time.sleep(0.3)
+                            
+                            try:
+                                port_functions = get_all_port_functions(main_port_name, jumperless_ports)
+                                organized_ports = organize_jumperless_ports(main_port_name, jumperless_ports, port_functions)
+                                
+                                portName = main_port_name
+                                portSelected = True
+                                
+                                arduinoPort = choose_arduino_port(organized_ports, main_port_name)
+                                
+                                safe_print(f"\nPort assignments:", Fore.CYAN)
+                                safe_print(f"Main communication: {portName} ({organized_ports.get(portName, 'Unknown')})", Fore.GREEN)
+                                
+                                if arduinoPort:
+                                    safe_print(f"Arduino programming: {arduinoPort} ({organized_ports.get(arduinoPort, 'Unknown')})", Fore.GREEN)
+                                else:
+                                    safe_print("Arduino programming: Not available", Fore.YELLOW)
+                                
+                                if debugWokwi:
+                                    safe_print(f"\nAll detected ports:", Fore.CYAN)
+                                    for port_name, function_desc in organized_ports.items():
+                                        safe_print(f"  {port_name}: {function_desc}", Fore.BLUE)
+                            except Exception as e:
+                                # Wrap in try/except like the fallback path
+                                safe_print(f"Error during port organization: {e}", Fore.YELLOW)
+                                portName = main_port_name
+                                portSelected = True
+                    
+                    # Windows: delay before final open
+                    if sys.platform == "win32":
+                        time.sleep(0.3)
+            except OSError as e:
+                if getattr(e, 'errno', None) == _ERRNO_HOTPLUG:
+                    safe_print("Device still connecting (USB hot-plug). Please wait a moment and press Enter to rescan.", Fore.YELLOW)
+                    prev_had_no_ports = True
+                    time.sleep(1)  # Brief delay before retry
+                else:
+                    safe_print(f"Port enumeration error: {e}", Fore.RED)
+                    time.sleep(0.5)  # Brief delay before retry
+            except Exception as e:
+                # Catch ALL exceptions to prevent crashes - defensive programming
+                safe_print(f"Unexpected error during port detection: {e}", Fore.RED)
                 if debugWokwi:
-                    safe_print(f"\nAll detected ports:", Fore.CYAN)
-                    for port_name, function_desc in organized_ports.items():
-                        safe_print(f"  {port_name}: {function_desc}", Fore.BLUE)
-    
-    # Attempt to open the selected port
-    try:
-        if updateInProgress == 0:
+                    import traceback
+                    traceback.print_exc()
+                prev_had_no_ports = True
+                time.sleep(1)  # Delay before retry
+                # Continue loop instead of crashing
+        
+        # Guard: if portName was never set, don't attempt to open
+        if not portName:
+            safe_print("No port selected. Could not establish serial connection.", Fore.RED)
             with serial_lock:
-                ser = serial.Serial(portName, 115200, timeout=1)
-                serialconnected = 1
-            safe_print(f"\nConnected to Jumperless at {portName}", Fore.GREEN)
-            return ser
-    except Exception as e:
-        safe_print(f"Failed to open serial port {portName}: {e}", Fore.RED)
+                ser = None
+                serialconnected = 0
+            return None
+        
+        # Windows: after rescan (device was just plugged in), give the port time to be openable.
+        # rescanned_from_empty is True when we went from "no ports" -> "found ports" -- the
+        # COM ports are registered in the OS but the driver may not have finished creating the
+        # device objects yet (causes OSError / winerror 433 = ERROR_DEVICE_NOT_EXIST).
+        if sys.platform == "win32" and rescanned_from_empty:
+            safe_print("Waiting for device to be ready...", Fore.CYAN)
+            time.sleep(2.5)
+        
+        # Close any stale handle so we don't hold the port ourselves
+        with serial_lock:
+            if ser is not None:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                ser = None
+                serialconnected = 0
+        
+        last_open_error = None  # Track for OSError 22 "device not ready" retry prompt
+        
+        # Attempt to open the selected port (with retry for Windows timing / OSError 22)
+        max_open_attempts = 8 if sys.platform == "win32" else 1
+        for attempt in range(max_open_attempts):
+            try:
+                if updateInProgress == 0:
+                    with serial_lock:
+                        ser = serial.Serial(portName, 115200, timeout=1)
+                        _set_serial_buffers(ser)
+                        serialconnected = 1
+                    safe_print(f"\nConnected to Jumperless at {portName}", Fore.GREEN)
+                    
+                    # Query firmware version through the open connection
+                    # (no extra port open/close that would disturb firmware state)
+                    try:
+                        _query_firmware_version_on_open_port(ser)
+                    except Exception as e:
+                        # Don't fail connection if version query fails
+                        if debugWokwi:
+                            safe_print(f"Could not query firmware version: {e}", Fore.YELLOW)
+                    
+                    return ser
+            except Exception as e:
+                last_open_error = e
+                delay = 2.0 if _is_oserror22(e) else 0.5
+                if attempt < max_open_attempts - 1:
+                    safe_print(f"Port open attempt {attempt + 1} failed: {e}, retrying in {delay:.1f}s...", Fore.YELLOW)
+                    time.sleep(delay)
+                else:
+                    safe_print(f"Failed to open serial port {portName}: {e}", Fore.RED)
+        
+        # --- Fallback: try other Jumperless ports if the selected one failed ---
+        # This handles the case where the auto-selected port has a PermissionError
+        # (e.g. another process holds it, or Windows driver issue)
+        all_oserror22 = last_open_error is not None and _is_oserror22(last_open_error)
+        if jumperless_ports:
+            other_ports = [p[0] for p in jumperless_ports if p[0] != portName]
+            if other_ports:
+                safe_print(f"Trying other Jumperless ports...", Fore.CYAN)
+                for alt_port in other_ports:
+                    try:
+                        if sys.platform == "win32":
+                            time.sleep(1.0 if all_oserror22 else 0.3)
+                        with serial_lock:
+                            ser = serial.Serial(alt_port, 115200, timeout=1)
+                            _set_serial_buffers(ser)
+                            serialconnected = 1
+                        safe_print(f"\nConnected to Jumperless at {alt_port} (fallback)", Fore.GREEN)
+                        portName = alt_port
+                        
+                        try:
+                            _query_firmware_version_on_open_port(ser)
+                        except Exception:
+                            pass  # Version query failure shouldn't break connection
+                        
+                        return ser
+                    except Exception as e2:
+                        if _is_oserror22(e2):
+                            all_oserror22 = True
+                        last_open_error = e2
+                        safe_print(f"  {alt_port}: {e2}", Fore.YELLOW)
+                        continue
+        
+        # OSError 22 / winerror 433 (device not ready): offer user retry instead of exiting
+        if all_oserror22 and sys.platform == "win32":
+            for user_retry in range(3):
+                safe_print(
+                    "\nDevice ports are visible but not ready yet (USB driver still initializing).",
+                    Fore.YELLOW,
+                )
+                safe_print(
+                    "Wait a few seconds, then press Enter to try again (or Ctrl+C to quit).",
+                    Fore.YELLOW,
+                )
+                try:
+                    input()
+                except (EOFError, KeyboardInterrupt):
+                    break
+                # Re-invalidate the port cache so the OS re-enumerates
+                try:
+                    _invalidate_windows_port_cache()
+                except Exception:
+                    pass
+                time.sleep(2)
+                safe_print(f"Attempting to open {portName}...", Fore.CYAN)
+                for attempt in range(5):
+                    try:
+                        with serial_lock:
+                            if ser is not None:
+                                try:
+                                    ser.close()
+                                except Exception:
+                                    pass
+                            ser = serial.Serial(portName, 115200, timeout=1)
+                            _set_serial_buffers(ser)
+                            serialconnected = 1
+                        safe_print(f"\nConnected to Jumperless at {portName}", Fore.GREEN)
+                        try:
+                            _query_firmware_version_on_open_port(ser)
+                        except Exception:
+                            pass
+                        return ser
+                    except Exception as e:
+                        last_open_error = e
+                        if attempt < 4:
+                            time.sleep(2.0)
+                if user_retry < 2:
+                    safe_print(f"Still could not open port. You can try again.", Fore.YELLOW)
+        
+        # --- All open attempts failed: show user-friendly debugging info ---
+        safe_print("\n" + "=" * 60, Fore.RED)
+        safe_print("  Could not open a serial connection to the Jumperless", Fore.RED)
+        safe_print("=" * 60, Fore.RED)
+        
+        # What we tried
+        tried_ports = [portName] if portName else []
+        if jumperless_ports:
+            tried_ports += [p[0] for p in jumperless_ports if p[0] != portName]
+        if tried_ports:
+            safe_print(f"\nPorts found: {', '.join(tried_ports)}", Fore.YELLOW)
+        
+        # Diagnose based on the last error
+        if last_open_error:
+            safe_print(f"Last error: {last_open_error}", Fore.YELLOW)
+            
+            if _is_oserror22(last_open_error):
+                safe_print("\nDiagnosis: Device Not Ready (Windows error 433 / OSError 22)", Fore.CYAN)
+                safe_print("  The USB ports are registered but the driver hasn't finished", Fore.WHITE)
+                safe_print("  initializing them. This often happens right after plugging in.", Fore.WHITE)
+                safe_print("\nSuggestions:", Fore.CYAN)
+                safe_print("  1. Unplug the Jumperless, wait 5 seconds, plug it back in", Fore.WHITE)
+                safe_print("  2. Wait 10-15 seconds after plugging in before rescanning", Fore.WHITE)
+                safe_print("  3. Try a different USB port or cable", Fore.WHITE)
+                safe_print("  4. Check Device Manager for driver issues (yellow triangle)", Fore.WHITE)
+            elif isinstance(last_open_error, PermissionError) or "PermissionError" in str(last_open_error):
+                safe_print("\nDiagnosis: Port In Use (Permission Denied)", Fore.CYAN)
+                safe_print("  Another program is probably using this serial port.", Fore.WHITE)
+                safe_print("\nSuggestions:", Fore.CYAN)
+                safe_print("  1. Close any serial monitors (Arduino IDE, PuTTY, etc.)", Fore.WHITE)
+                safe_print("  2. Close any other Jumperless Bridge instances", Fore.WHITE)
+                safe_print("  3. Check Task Manager for processes using the COM port", Fore.WHITE)
+            elif isinstance(last_open_error, FileNotFoundError) or "FileNotFoundError" in str(last_open_error):
+                safe_print("\nDiagnosis: Port Disappeared", Fore.CYAN)
+                safe_print("  The port was detected during scanning but is no longer available.", Fore.WHITE)
+                safe_print("  The device may have been disconnected or the driver crashed.", Fore.WHITE)
+                safe_print("\nSuggestions:", Fore.CYAN)
+                safe_print("  1. Check that the USB cable is firmly connected", Fore.WHITE)
+                safe_print("  2. Try unplugging and re-plugging the Jumperless", Fore.WHITE)
+                safe_print("  3. Try a different USB port", Fore.WHITE)
+            else:
+                safe_print(f"\nDiagnosis: Unexpected Error ({type(last_open_error).__name__})", Fore.CYAN)
+                safe_print("\nSuggestions:", Fore.CYAN)
+                safe_print("  1. Unplug the Jumperless, wait a few seconds, plug it back in", Fore.WHITE)
+                safe_print("  2. Try a different USB port or cable", Fore.WHITE)
+                safe_print("  3. Restart the app", Fore.WHITE)
+        else:
+            safe_print("\nNo ports could be opened (no specific error recorded).", Fore.YELLOW)
+            safe_print("  Try unplugging and re-plugging the Jumperless.", Fore.WHITE)
+        
+        safe_print("", Fore.RESET)  # blank line
+        
         with serial_lock:
             ser = None
             serialconnected = 0
         return None
+    
+    except Exception as e:
+        # Ultimate safety net: catch ANY exception to prevent crash
+        safe_print(f"\nFatal error in open_serial(): {e}", Fore.RED)
+        safe_print("This is a bug -- please report it at github.com/Architeuthis-Flux/Jumperless-App\nor to Kevin directly at kevin@jumperless.org", Fore.YELLOW)
+        if debugWokwi:
+            import traceback
+            traceback.print_exc()
+            time.sleep(20)
+        with serial_lock:
+            ser = None
+            serialconnected = 0
+        return None
+
+def _query_firmware_version_on_open_port(ser_port):
+    """Query firmware version using an already-open serial connection.
+    
+    This avoids the extra open/close cycle that disturbs firmware state.
+    Sends '?', reads the firmware version response, then sends DLE (0x10)
+    to dismiss the info display. All leftover data is consumed.
+    
+    Holds serial_lock to prevent race conditions with I/O threads that
+    might start reading from the port after serialconnected is set.
+    """
+    try:
+        with serial_lock:
+            # Clear any pending data from the connection
+            ser_port.reset_input_buffer()
+            time.sleep(0.1)
+            
+            # Send '?' to request firmware info
+            ser_port.write(b'?')
+            ser_port.flush()
+        
+        # time.sleep(0.15)
+        
+        # Read the full response
+        response_buffer = b''
+        start_time = time.time()
+        with serial_lock:
+            while time.time() - start_time < 3.9:
+                if ser_port.in_waiting > 0:
+                    response_buffer += ser_port.read(ser_port.in_waiting)
+                    time.sleep(0.2)
+                else:
+                    time.sleep(0.15)
+                    if ser_port.in_waiting == 0:
+                        break
+        
+        if response_buffer:
+            response_str = response_buffer.decode('utf-8', errors='ignore')
+            if "Jumperless firmware version:" in response_str or "firmware" in response_str.lower():
+                parse_firmware_version(response_str)
+            
+            with serial_lock:
+                # Send DLE to dismiss info display
+                ser_port.write(b'\x10')
+                ser_port.flush()
+                time.sleep(0.1)
+        
+        # Drain any remaining data so it doesn't leak into the terminal
+        time.sleep(0.2)
+        with serial_lock:
+            if ser_port.in_waiting > 0:
+                ser_port.read(ser_port.in_waiting)
+    
+    except Exception as e:
+        if debugWokwi:
+            safe_print(f"Could not query firmware version: {e}", Fore.YELLOW)
 
 # ============================================================================
 # FIRMWARE MANAGEMENT
@@ -4624,9 +5698,19 @@ def check_presence(correct_port, interval):
                 try:
                     ports = serial.tools.list_ports.comports()
                     for port in ports:
-                        if correct_port in port.device:
-                            port_found = True
-                            break
+                        try:
+                            if correct_port in port.device:
+                                port_found = True
+                                break
+                        except OSError as oe:
+                            if getattr(oe, 'errno', None) == _ERRNO_HOTPLUG:
+                                continue  # Device in flux during hot-plug, skip
+                            raise
+                except OSError as oe:
+                    if getattr(oe, 'errno', None) == _ERRNO_HOTPLUG:
+                        port_found = False  # Hot-plug race, treat as not found
+                    else:
+                        raise
                 except Exception:
                     port_found = False
                 
@@ -4649,6 +5733,7 @@ def check_presence(correct_port, interval):
                                     pass
                             
                             ser = serial.Serial(correct_port, 115200, timeout=0.5)
+                            _set_serial_buffers(ser)
                             serialconnected = 1
                             portNotFound = 0
                             justreconnected = 1
@@ -4688,8 +5773,16 @@ def check_presence(correct_port, interval):
         else:
             time.sleep(0.1)
 
+# Threshold above which we read in chunks (burst mode) instead of byte-by-byte.
+# Lower = switch to burst sooner. Larger chunks = fewer syscalls, less drop.
+SERIAL_BURST_READ_THRESHOLD = 32768
+SERIAL_READ_CHUNK_SIZE = 32768      # 32KB per read
+SERIAL_MAX_READ_PER_LOOP = 262144   # 256KB max per lock hold; drain until empty when possible
+
 def serial_term_in():
-    """Handle incoming serial data with reliable byte-by-byte reading and interactive mode control"""
+    """Handle incoming serial data with burst-friendly reading and interactive mode control.
+    Uses chunk reads when data is arriving fast (e.g. ANSI from device) to avoid dropping
+    characters on Windows; uses byte-by-byte + stabilize for low-volume interactive input."""
     global serialconnected, ser, menuEntered, portNotFound, justreconnected, updateInProgress, interactive_mode, shutting_down
     
     while True:
@@ -4697,31 +5790,49 @@ def serial_term_in():
         if shutting_down:
             return
         # Always check for interactive mode control characters, even during menu/updates
+        had_data = False
         if updateInProgress == 0:
             try:
                 # Use serial_lock to prevent conflicts with check_arduino_presence() and other serial operations
                 with serial_lock:
                     if ser and ser.is_open and ser.in_waiting > 0:
                         input_buffer = b''
-                        
-                        # Read byte-by-byte until buffer stabilizes
-                        while serialconnected and ser and ser.is_open:
-                            try:
-                                if ser.in_waiting > 0:
-                                    in_byte = ser.read(1)
-                                    if in_byte:
-                                        input_buffer += in_byte
-                                
-                                # Check if buffer has stabilized (no new data for a short time)
-                                if ser.in_waiting == 0:
-                                    time.sleep(0.005)  # Wait a bit to see if more data arrives
+                        waiting = ser.in_waiting
+                        if waiting >= SERIAL_BURST_READ_THRESHOLD:
+                            # Burst mode: drain in large chunks until empty (or cap) to minimize drops
+                            total_read = 0
+                            while serialconnected and ser and ser.is_open and total_read < SERIAL_MAX_READ_PER_LOOP:
+                                try:
+                                    n = ser.in_waiting
+                                    if n == 0:
+                                        break
+                                    chunk = ser.read(min(n, SERIAL_READ_CHUNK_SIZE))
+                                    if chunk:
+                                        input_buffer += chunk
+                                        total_read += len(chunk)
+                                    # Keep draining until driver buffer is empty
                                     if ser.in_waiting == 0:
-                                        break  # Buffer is stable, process what we have
-                            except (serial.SerialException, serial.SerialTimeoutException):
-                                break
+                                        break
+                                except (serial.SerialException, serial.SerialTimeoutException):
+                                    break
+                        else:
+                            # Low-volume: byte-by-byte until buffer stabilizes (preserves interactive responsiveness)
+                            while serialconnected and ser and ser.is_open:
+                                try:
+                                    if ser.in_waiting > 0:
+                                        in_byte = ser.read(ser.in_waiting)
+                                        if in_byte:
+                                            input_buffer += in_byte
+                                    if ser.in_waiting == 0:
+                                        time.sleep(0.005)
+                                        if ser.in_waiting == 0:
+                                            break
+                                except (serial.SerialException, serial.SerialTimeoutException):
+                                    break
                     else:
                         input_buffer = b''
                 
+                had_data = bool(input_buffer)
                 if input_buffer:
                         try:
                             # Always check for interactive mode control characters
@@ -4787,18 +5898,22 @@ def serial_term_in():
                                     except (ValueError, IndexError):
                                         pass
                                 
-                                # Print remaining output
-                                if decoded_string.strip():  # Only print if there's something left
-                                    if interactive_mode:
-                                        print(decoded_string, end='')
-                                    else:
-                                        print(decoded_string, end='')
+                                # Print remaining output: one write + flush reduces dropped chars on Windows
+                                if decoded_string.strip():
+                                    try:
+                                        sys.stdout.write(decoded_string)
+                                        sys.stdout.flush()
+                                    except (OSError, UnicodeEncodeError):
+                                        pass
                             
                             with serial_lock:
                                 portNotFound = 0
                         except Exception:
                             pass
                 else:
+                    time.sleep(0.001)
+                # When we just processed data, don't sleep so we immediately drain more (reduces drops)
+                if not had_data:
                     time.sleep(0.005)
                         
             except (serial.SerialException, serial.SerialTimeoutException):
@@ -4817,9 +5932,10 @@ def serial_term_in():
             except Exception:
                 pass
         else:
-            time.sleep(0.01)
+            time.sleep(0.005)
         
-        time.sleep(0.001)  # Very short sleep to prevent excessive CPU usage
+        # Only sleep when idle (no data just processed) to keep drain rate high during bursts
+        # (had_data check is in the updateInProgress==0 branch above)
 
 def serial_term_out():
     """Handle outgoing serial commands with command history support and interactive mode"""
@@ -5060,7 +6176,7 @@ def construct_jumperless_command(connections, is_jumperless_v5):
 def main():
     """Main application entry point"""
     global menuEntered, noWokwiStuff, currentSlotUpdate, forceWokwiUpdate
-    global lastDiagram, diagram, serialconnected, ser, justreconnected
+    global lastDiagram, diagram, serialconnected, ser, justreconnected, portName
     
     # Initialize command history
     setup_command_history()
@@ -5128,12 +6244,71 @@ def main():
     update_app_if_needed()
     
     
-    # Open serial connection
-    open_serial()
-    
-    if not serialconnected:
-        safe_print("Could not establish serial connection. Exiting.", Fore.RED)
-        return
+    # Open serial connection (retries with full rescan on failure)
+    while True:
+        try:
+            open_serial()
+        except KeyboardInterrupt:
+            safe_print("\nInterrupted.", Fore.YELLOW)
+        
+        if serialconnected:
+            break
+        
+        # open_serial already printed detailed diagnostics -- offer rescan or quit
+        safe_print("What would you like to do?", Fore.CYAN)
+        safe_print("  [Enter] Rescan for devices (goes back to port detection)", Fore.WHITE)
+        safe_print("  [m]     Manual port selection (pick from all available ports)", Fore.WHITE)
+        safe_print("  [q]     Quit the app", Fore.WHITE)
+        try:
+            choice = input("\n> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            choice = "q"
+        
+        if choice == "q":
+            safe_print("Exiting.", Fore.RED)
+            return
+        
+        if choice == "m":
+            # Quick manual selection: list all ports and let user pick
+            try:
+                ports = get_available_ports()
+                if ports:
+                    safe_print("\nAll available serial ports:", Fore.CYAN)
+                    for i, (port, desc, hwid, iface, attrs) in enumerate(sorted(ports, key=extract_port_interface_number), 1):
+                        safe_print(f"  {i}: {port} [{desc}]", Fore.WHITE)
+                    safe_print(f"\nEnter port number (1-{len(ports)}): ", Fore.CYAN, end="")
+                    try:
+                        sel = input().strip()
+                        idx = int(sel) - 1
+                        if 0 <= idx < len(ports):
+                            sorted_ports = sorted(ports, key=extract_port_interface_number)
+                            portName = sorted_ports[idx][0]
+                            safe_print(f"Trying {portName}...", Fore.GREEN)
+                            try:
+                                with serial_lock:
+                                    if ser is not None:
+                                        try:
+                                            ser.close()
+                                        except Exception:
+                                            pass
+                                    ser = serial.Serial(portName, 115200, timeout=1)
+                                    _set_serial_buffers(ser)
+                                    serialconnected = 1
+                                safe_print(f"Connected to {portName}!", Fore.GREEN)
+                                break
+                            except Exception as e:
+                                safe_print(f"Could not open {portName}: {e}", Fore.RED)
+                        else:
+                            safe_print("Invalid port number.", Fore.YELLOW)
+                    except (ValueError, EOFError, KeyboardInterrupt):
+                        safe_print("Invalid selection.", Fore.YELLOW)
+                else:
+                    safe_print("No serial ports found.", Fore.RED)
+            except Exception as e:
+                safe_print(f"Error listing ports: {e}", Fore.RED)
+            continue
+        
+        safe_print("\nRetrying connection...\n", Fore.CYAN)
     
     # Check firmware
     check_if_fw_is_old()
@@ -5170,6 +6345,7 @@ def main():
     
     if sys.platform == "win32":
         safe_print("Interactive mode available (Windows pynput - full Ctrl key support)", Fore.GREEN)
+        safe_print("For smoothest ANSI output (e.g. LED display), use Windows Terminal if available", Fore.CYAN)
     else:
         safe_print("Interactive mode available (Unix termios)", Fore.GREEN)
     
@@ -5834,7 +7010,65 @@ def cleanup_on_exit():
     safe_print("Cleanup completed", Fore.GREEN)
     
 
+def _wait_before_exit(reason="exit"):
+    """Keep window open so user can read error/output before it closes."""
+    try:
+        input("\nPress Enter to close... ")
+    except (EOFError, KeyboardInterrupt):
+        time.sleep(10)
+        pass
+
+
+def _install_excepthook():
+    """Install global exception handler so crashes print traceback and keep window open."""
+    def _excepthook(exc_type, exc_value, exc_tb):
+        print("\n" + "=" * 60)
+        print("UNHANDLED EXCEPTION - The application has crashed")
+        print("=" * 60)
+        if exc_tb:
+            print("\nTraceback:")
+            print("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+        else:
+            print(f"\n{exc_type.__name__}: {exc_value}")
+        print("=" * 60)
+        _wait_before_exit("crash")
+        sys.exit(1)
+    sys.excepthook = _excepthook
+
+    # Python 3.8+: also catch unhandled exceptions in worker threads
+    if hasattr(threading, 'excepthook'):
+        def _thread_excepthook(args):
+            print("\n" + "=" * 60)
+            print("UNHANDLED EXCEPTION IN THREAD")
+            print("=" * 60)
+            if args.exc_traceback:
+                print("\nTraceback:")
+                print("".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+            else:
+                print(f"\n{args.exc_type.__name__}: {args.exc_value}")
+            if args.thread:
+                print(f"\nThread: {args.thread.name}")
+            print("=" * 60)
+            # Don't sys.exit or input() here - main thread may still be running
+        threading.excepthook = _thread_excepthook
+
+
 if __name__ == "__main__":
+    # Install global excepthook first (catches crashes during import or in threads)
+    _install_excepthook()
+    
+    # --test-connect-fail [N]  : simulate OSError 22 on the first N serial opens (default 8)
+    # Useful for testing the retry / diagnostic / rescan flow without the actual hardware issue.
+    if "--test-connect-fail" in sys.argv:
+        _tcf_idx = sys.argv.index("--test-connect-fail")
+        _tcf_n = 8  # default: enough to exhaust retries + fallback
+        if _tcf_idx + 1 < len(sys.argv):
+            try:
+                _tcf_n = int(sys.argv[_tcf_idx + 1])
+            except ValueError:
+                pass
+        _install_connect_fail_simulation(_tcf_n)
+    
     # Register cleanup function for normal exit
     import atexit
     atexit.register(cleanup_on_exit)
@@ -5846,13 +7080,23 @@ if __name__ == "__main__":
         cleanup_on_exit()
         safe_print("Exiting...", Fore.YELLOW)
     except Exception as e:
-        safe_print(f"Fatal error: {e}", Fore.RED)
-        cleanup_on_exit()
+        print("\n" + "=" * 60)
+        safe_print("FATAL ERROR - The application has crashed", Fore.RED)
+        print("=" * 60)
+        safe_print(f"\nError: {e}", Fore.RED)
+        print("\nFull traceback:")
+        traceback.print_exc()
+        print("=" * 60)
+        try:
+            cleanup_on_exit()
+        except Exception as cleanup_err:
+            print(f"Cleanup failed: {cleanup_err}")
+        _wait_before_exit("crash")
+        sys.exit(1)
     finally:
         # Ensure cleanup happens even if something goes wrong
         try:
-            # Only call cleanup if it hasn't been called yet
             if active_processes or (ser and serialconnected):
                 cleanup_on_exit()
-        except:
+        except Exception:
             pass

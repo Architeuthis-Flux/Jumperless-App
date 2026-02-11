@@ -3,7 +3,7 @@
 ## 📦 Package Overview
 
 **Package Name**: `jumperless`  
-**Current Version**: 1.1.1.14  
+**Current Version**: 1.1.1.16
 **PyPI URL**: https://pypi.org/project/jumperless/ (after publishing)  
 **Installation**: `pipx install jumperless` or `pip install jumperless`
 
@@ -59,12 +59,12 @@ nano JumperlessWokwiBridge.py
 
 **File 1**: `pyproject.toml`
 ```toml
-version = "1.1.1.15"  # Line 7
+version = "1.1.1.18"  # Line 7
 ```
 
 **File 2**: `JumperlessWokwiBridge.py`
 ```python
-App_Version = "1.1.1.15"  # Line 7
+App_Version = "1.1.1.18"  # Line 7
 ```
 
 ### 3. Copy to Package
