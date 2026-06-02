@@ -488,6 +488,17 @@ savedProjectsFile = os.path.join(SCRIPT_DIR, "JumperlessFiles", "savedProjects.t
 latestFirmwareAddress = "https://github.com/Architeuthis-Flux/Jumperless/releases/latest/download/firmware.uf2"
 latestFirmwareAddressV5 = "https://github.com/Architeuthis-Flux/JumperlessV5/releases/latest/download/firmware.uf2"
 
+# V5-class firmware is now published to two repos (the original JumperlessV5 repo
+# and the newer JumperlOS repo). We check both and download whichever published
+# the newer release. Order doesn't matter; the newest version wins.
+firmware_repos_v5 = [
+    "Architeuthis-Flux/JumperlessV5",
+    "Architeuthis-Flux/JumperlOS",
+]
+# Resolved at version-check/download time to the winning repo's firmware.uf2 URL.
+latestFirmwareDownloadUrl = None
+latestFirmwareRepo = None
+
 # App Update URLs
 app_update_repo = "Architeuthis-Flux/JumperlessV5"  # Repository for app updates
 app_script_name = "JumperlessWokwiBridge.py"
@@ -2544,9 +2555,54 @@ def _query_firmware_version_on_open_port(ser_port):
 # FIRMWARE MANAGEMENT
 # ============================================================================
 latestFirmware = "5.1.2.6"
+
+def get_latest_release_tag(repo):
+    """Return the tag (version string) of a repo's latest GitHub release.
+
+    Uses the /releases/latest redirect rather than the API so we don't burn the
+    unauthenticated API rate limit. Returns None on any failure (including a repo
+    with no published release) so callers can fall back to another source.
+    """
+    try:
+        response = requests.get(f"https://github.com/{repo}/releases/latest", timeout=10)
+        tag = response.url.rstrip('/').split('/').pop()
+        # A real release tag looks like a version ("5.7.0.3"). If there is no
+        # release the URL stays on ".../releases/latest" -> tag == "latest".
+        if tag and any(ch.isdigit() for ch in tag):
+            return tag
+    except Exception as e:
+        if debugWokwi:
+            safe_print(f"Could not fetch latest release for {repo}: {e}", Fore.YELLOW)
+    return None
+
+def get_newest_firmware_source(repos):
+    """Pick the repo with the newest firmware release.
+
+    Returns (tag, repo, download_url) for whichever repo published the highest
+    version, or (None, None, None) if none of them yield a usable release.
+    All V5-class repos publish the same 'firmware.uf2' asset, so only the repo
+    differs in the download URL.
+    """
+    best_tag = None
+    best_repo = None
+    for repo in repos:
+        tag = get_latest_release_tag(repo)
+        if not tag:
+            continue
+        # firmware_version_compare(a, b) is True when a >= b; require strictly
+        # newer so the first-listed repo wins ties.
+        if best_tag is None or (tag != best_tag and firmware_version_compare(tag, best_tag)):
+            best_tag = tag
+            best_repo = repo
+    if best_repo is None:
+        return (None, None, None)
+    download_url = f"https://github.com/{best_repo}/releases/latest/download/firmware.uf2"
+    return (best_tag, best_repo, download_url)
+
 def check_if_fw_is_old():
     """Check if firmware needs updating"""
     global currentString, jumperlessFirmwareString, jumperlessV5, noWokwiStuff, latestFirmware
+    global latestFirmwareDownloadUrl, latestFirmwareRepo
     
     if len(jumperlessFirmwareString) < 2:
         safe_print('\nCould not read FW version from the Jumperless', Fore.YELLOW)
@@ -2599,13 +2655,19 @@ def check_if_fw_is_old():
             safe_print(f"Invalid major version number: {current_list[0]}", Fore.YELLOW)
             return False
         
-        # Check latest version online
-        repo_url = ("https://github.com/Architeuthis-Flux/JumperlessV5/releases/latest" 
-                   if jumperlessV5 else 
-                   "https://github.com/Architeuthis-Flux/Jumperless/releases/latest")
-        
-        response = requests.get(repo_url, timeout=10)
-        version = response.url.split("/").pop()
+        # Check latest version online. V5-class firmware lives in two repos now
+        # (JumperlessV5 and JumperlOS); check both and use whichever published the
+        # newer release. Legacy (pre-V5) firmware stays on the original repo.
+        if jumperlessV5:
+            version, latestFirmwareRepo, latestFirmwareDownloadUrl = get_newest_firmware_source(firmware_repos_v5)
+            if version is None:
+                safe_print("Could not check the latest firmware version online", Fore.YELLOW)
+                return False
+        else:
+            response = requests.get("https://github.com/Architeuthis-Flux/Jumperless/releases/latest", timeout=10)
+            version = response.url.rstrip('/').split('/').pop()
+            latestFirmwareRepo = "Architeuthis-Flux/Jumperless"
+            latestFirmwareDownloadUrl = latestFirmwareAddress
         
         latest_list = version.split('.')
         if len(latest_list) < 3:
@@ -2626,7 +2688,8 @@ def check_if_fw_is_old():
         
         latestFirmware = version
         if latest_int > current_int:
-            safe_print(f"\nLatest firmware: {version}", Fore.MAGENTA)
+            repo_note = f"  ({latestFirmwareRepo.split('/')[-1]})" if latestFirmwareRepo else ""
+            safe_print(f"\nLatest firmware: {version}{repo_note}", Fore.MAGENTA)
             safe_print(f"Current version: {currentString}", Fore.RED)
             update_jumperless_firmware(force=False)
             return True
@@ -2676,7 +2739,19 @@ def update_jumperless_firmware(force=False):
         updateInProgress = 1
         
         try:
-            firmware_url = latestFirmwareAddressV5 if jumperlessV5 else latestFirmwareAddress
+            if jumperlessV5:
+                # Prefer the source resolved by check_if_fw_is_old(); if this is a
+                # forced/manual update that didn't run the check, resolve the newest
+                # of the two V5 repos now. Fall back to the static URL if offline.
+                firmware_url = latestFirmwareDownloadUrl
+                if not firmware_url:
+                    _tag, _repo, firmware_url = get_newest_firmware_source(firmware_repos_v5)
+                if not firmware_url:
+                    firmware_url = latestFirmwareAddressV5
+            else:
+                firmware_url = latestFirmwareAddress
+            if debugWokwi:
+                safe_print(f"Downloading firmware from: {firmware_url}", Fore.BLUE)
             urlretrieve(firmware_url, "firmware.uf2")
             safe_print("Firmware downloaded successfully!", Fore.CYAN)
             

@@ -392,7 +392,9 @@ def create_macos_dmg(macos_dir, arch):
     """Create macOS DMG"""
     print("Creating macOS DMG...")
     
-    dmg_name = f"Jumperless-macOS-{arch}.dmg"
+    # Write the DMG into builds/ (next to the archives) so the workflow's
+    # release globs (builds/Jumperless-*.dmg) pick it up.
+    dmg_name = str(macos_dir.parent / f"Jumperless-macOS-{arch}.dmg")
     
     # Create a temp directory without spaces for create-dmg
     temp_dir = Path(f"temp_dmg_{arch}")
@@ -551,9 +553,14 @@ See LICENSE file for details.
     with open(readme_path, 'w', encoding='utf-8') as f:
         f.write(readme_content)
 
-def create_archives(platform, output_dir):
-    """Create compressed archives of the packages"""
-    print(f"Creating archives for {platform}")
+def create_archives(platform, output_dir, label):
+    """Create compressed archives of the packages.
+
+    `label` is the release-asset base name (e.g. "Jumperless-macOS-Apple-Silicon").
+    It must be unique per platform+arch so the two macOS (and two Windows) builds
+    don't overwrite each other's archives on the GitHub release.
+    """
+    print(f"Creating archives for {platform} ({label})")
     
     platform_dir = output_dir / platform
     if not platform_dir.exists():
@@ -565,9 +572,9 @@ def create_archives(platform, output_dir):
     
     # Create tar.gz for Linux/macOS (especially when preferred)
     if platform in ['linux', 'macos']:
-        tar_path = output_dir / f"Jumperless-{platform.title()}.tar.gz"
+        tar_path = output_dir / f"{label}.tar.gz"
         with tarfile.open(tar_path, 'w:gz') as tar:
-            tar.add(platform_dir, arcname=f"Jumperless-{platform.title()}")
+            tar.add(platform_dir, arcname=label)
         print(f"Created tar.gz archive: {tar_path}")
         
         # Skip ZIP creation for Linux if tar.gz is preferred
@@ -576,7 +583,7 @@ def create_archives(platform, output_dir):
             return
     
     # Create ZIP archive (universal fallback or for Windows)
-    zip_path = output_dir / f"Jumperless-{platform.title()}.zip"
+    zip_path = output_dir / f"{label}.zip"
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk(platform_dir):
             for file in files:
@@ -592,10 +599,18 @@ def main():
     parser = argparse.ArgumentParser(description="Package Jumperless for specific platform")
     parser.add_argument("--platform", required=True, choices=["linux", "macos", "windows"])
     parser.add_argument("--arch", required=True, choices=["x64", "x86", "arm64"])
+    parser.add_argument("--label", default=None,
+                        help="Release-asset base name (e.g. Jumperless-macOS-Apple-Silicon). "
+                             "Must be unique per platform+arch; defaults to "
+                             "Jumperless-<Platform>-<arch>.")
     
     args = parser.parse_args()
     
-    print(f"Packaging Jumperless for {args.platform}-{args.arch}")
+    # Unique per platform+arch so the two macOS / two Windows builds don't clobber
+    # each other's release assets (the old Jumperless-<Platform> name collided).
+    label = args.label or f"Jumperless-{args.platform.title()}-{args.arch}"
+    
+    print(f"Packaging Jumperless for {args.platform}-{args.arch} (asset: {label})")
     print("=" * 60)
     
     # Create output directory
@@ -606,7 +621,7 @@ def main():
     package_platform(args.platform, args.arch, output_dir)
     
     # Create archives
-    create_archives(args.platform, output_dir)
+    create_archives(args.platform, output_dir, label)
     
     print(f"\nPackaging complete for {args.platform}-{args.arch}!")
     print(f"Output directory: {output_dir}")

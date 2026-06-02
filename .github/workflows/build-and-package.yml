@@ -295,6 +295,25 @@ jobs:
           exit 1
         fi
         
+        # Validate APPLE_ID looks like an email address (notarytool wants the Apple
+        # ID *email*, not a name/typo, and a stray space/newline will 401).
+        if [[ ! "$APPLE_ID" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
+          echo "ERROR: APPLE_ID does not look like an email address (got length ${#APPLE_ID})."
+          echo "       It must be the Apple ID email used to create the app-specific password."
+          echo "       Check the APPLE_ID secret for typos or trailing whitespace/newlines."
+          exit 1
+        fi
+        
+        # Validate APPLE_ID_PASSWORD is an app-specific password: xxxx-xxxx-xxxx-xxxx.
+        # A normal Apple ID password will not work and triggers HTTP 401.
+        if [[ ! "$APPLE_ID_PASSWORD" =~ ^[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$ ]]; then
+          echo "ERROR: APPLE_ID_PASSWORD is not in app-specific password format (xxxx-xxxx-xxxx-xxxx)."
+          echo "       Length seen: ${#APPLE_ID_PASSWORD} (a valid one is exactly 19 chars)."
+          echo "       Generate one at https://appleid.apple.com -> Sign-In and Security ->"
+          echo "       App-Specific Passwords, signed in as the SAME Apple ID as APPLE_ID."
+          exit 1
+        fi
+        
         APP_PATH="dist/macos/Jumperless.app"
         if [ -d "$APP_PATH" ]; then
           echo "Creating archive for notarization"
@@ -340,21 +359,21 @@ jobs:
     - name: Create platform-specific package (Linux)
       if: matrix.platform == 'linux'
       run: |
-        python Scripts/package_app.py --platform linux --arch ${{ matrix.arch }}
+        python Scripts/package_app.py --platform linux --arch ${{ matrix.arch }} --label "${{ matrix.artifact-name }}"
       env:
         PREFER_TARGZ: "true"  # Signal to prefer tar.gz over zip for Linux
         
     - name: Create platform-specific package (macOS)
       if: matrix.platform == 'macos'
       run: |
-        python Scripts/package_app.py --platform macos --arch ${{ matrix.arch }}
+        python Scripts/package_app.py --platform macos --arch ${{ matrix.arch }} --label "${{ matrix.artifact-name }}"
       env:
         DISABLE_MACOS_DMG: ${{ env.DISABLE_MACOS_DMG }}
         
     - name: Create platform-specific package (Windows)
       if: matrix.platform == 'windows'
       run: |
-        python Scripts/package_app.py --platform windows --arch ${{ matrix.arch }}
+        python Scripts/package_app.py --platform windows --arch ${{ matrix.arch }} --label "${{ matrix.artifact-name }}"
         
     - name: Run basic smoke test
       if: matrix.platform != 'windows'
@@ -365,10 +384,13 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.artifact-name }}
+        # Only the packaged archives/installer — NOT the raw unpacked .app tree,
+        # which previously got uploaded as hundreds of loose release assets.
         path: |
-          builds/${{ matrix.platform }}/
-          !builds/**/*.pyc
-          !builds/**/__pycache__/
+          builds/Jumperless-*.zip
+          builds/Jumperless-*.tar.gz
+          builds/Jumperless-*.dmg
+        if-no-files-found: error
         retention-days: 90
         compression-level: 6
         
@@ -377,7 +399,9 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         files: |
-          builds/${{ matrix.platform }}/*
+          builds/Jumperless-*.zip
+          builds/Jumperless-*.tar.gz
+          builds/Jumperless-*.dmg
         tag_name: "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}"
         draft: false
         prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -410,7 +434,11 @@ jobs:
     - name: Upload combined release
       uses: softprops/action-gh-release@v2
       with:
-        files: combined-release/**/*
+        # Only the packaged archives/installers — not the unpacked .app internals.
+        files: |
+          combined-release/**/*.zip
+          combined-release/**/*.tar.gz
+          combined-release/**/*.dmg
         name: "Jumperless ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}"
         tag_name: "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}"
         body: |
