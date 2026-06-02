@@ -3,7 +3,7 @@
 ## 📦 Package Overview
 
 **Package Name**: `jumperless`  
-**Current Version**: 1.1.1.16
+**Current Version**: 1.1.1.19
 **PyPI URL**: https://pypi.org/project/jumperless/ (after publishing)  
 **Installation**: `pipx install jumperless` or `pip install jumperless`
 
@@ -59,12 +59,12 @@ nano JumperlessWokwiBridge.py
 
 **File 1**: `pyproject.toml`
 ```toml
-version = "1.1.1.18"  # Line 7
+version = "1.1.1.19"  # Line 7
 ```
 
 **File 2**: `JumperlessWokwiBridge.py`
 ```python
-App_Version = "1.1.1.18"  # Line 7
+App_Version = "1.1.1.19"  # Line 7
 ```
 
 ### 3. Copy to Package
@@ -166,7 +166,7 @@ All dependencies from `requirements.txt` are automatically installed:
 
 ### Python Version Support
 - Python 3.8+
-- Tested on Python 3.8, 3.9, 3.10, 3.11, 3.12
+- Tested on Python 3.8, 3.9, 3.10, 3.11, 3.12, 3.13
 
 ### Platform Support
 - ✅ Windows
@@ -209,13 +209,13 @@ pipx install --index-url https://test.pypi.org/simple/ \
 
 Format: `MAJOR.MINOR.PATCH.BUILD`
 
-**Current**: 1.1.1.14
+**Current**: 1.1.1.19
 
 **When to increment:**
 - `MAJOR` (1.x.x.x): Breaking changes, incompatible API
 - `MINOR` (x.1.x.x): New features, backwards compatible
 - `PATCH` (x.x.1.x): Bug fixes, backwards compatible  
-- `BUILD` (x.x.x.14): Build number, small tweaks
+- `BUILD` (x.x.x.19): Build number, small tweaks
 
 **Example progression:**
 - Bug fix: 1.1.1.14 → 1.1.1.15
