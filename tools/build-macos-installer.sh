@@ -140,5 +140,11 @@ echo "================================"
 echo "Done"
 echo "================================"
 echo "  App:  $ROOT/dist/macos/Jumperless.app"
-[[ "$CI" == "1" ]] && echo "  Zip:  $OUTPUT_DIR/Jumperless-macOS-Apple-Silicon.zip"
-[[ -f "$DMG_OUT" ]] && { echo "  DMG:  $DMG_OUT"; ls -lh "$DMG_OUT"; }
+if [[ "$CI" == "1" ]]; then
+  echo "  Zip:  $OUTPUT_DIR/Jumperless-macOS-Apple-Silicon.zip"
+fi
+if [[ -f "$DMG_OUT" ]]; then
+  echo "  DMG:  $DMG_OUT"
+  ls -lh "$DMG_OUT"
+fi
+exit 0

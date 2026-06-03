@@ -86,9 +86,9 @@ def build_linux() -> None:
     exe = pyinstaller_onefile("linux", ICONS / "icon.png")
     appimagetool = shutil.which("appimagetool")
     if not appimagetool:
-        print("  (appimagetool not found — skipping AppImage; raw executable built)")
+        print("  (appimagetool not found - skipping AppImage; raw executable built)")
         return
-    print("  appimagetool found — building AppImage")
+    print("  appimagetool found - building AppImage")
     appdir = LOCAL / "linux" / "Jumperless.AppDir"
     if appdir.exists():
         shutil.rmtree(appdir)

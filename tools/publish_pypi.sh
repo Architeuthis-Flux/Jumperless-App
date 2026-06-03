@@ -7,7 +7,7 @@
 #   ./tools/publish_pypi.sh --prod      # ... then upload to PyPI
 #
 # Auth: twine reads ~/.pypirc or TWINE_USERNAME/TWINE_PASSWORD
-#       (username __token__, password = your pypi-… API token).
+#       (username __token__, password = your pypi-... API token).
 
 set -euo pipefail
 

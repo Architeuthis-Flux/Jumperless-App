@@ -30,6 +30,13 @@ LAUNCHER = ROOT / "launcher"
 ICONS = ROOT / "assets" / "icons"
 BUILD_WORK = ROOT / "build" / "launcher"
 
+# Windows CI consoles default to cp1252; keep stdout UTF-8 tolerant.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
 
 def resolve_out(arg_out: str | None) -> Path:
     base = arg_out or os.environ.get("JUMPERLESS_OUTPUT_DIR")
@@ -175,7 +182,7 @@ def build_windows_exe(dest: Path) -> None:
     try:
         import PyInstaller  # noqa: F401
     except ImportError:
-        print("  Installing PyInstaller for Windows .exe…")
+        print("  Installing PyInstaller for Windows .exe...")
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "pyinstaller>=6.15"],
             check=True,
@@ -240,7 +247,7 @@ def main() -> int:
     version = read_version()
     clean(out)
 
-    print(f"Building uv launcher artifacts (v{version}) → {out}")
+    print(f"Building uv launcher artifacts (v{version}) -> {out}")
     if sys.platform == "darwin":
         build_macos(out, version)
         build_linux(out, version)
@@ -251,7 +258,7 @@ def main() -> int:
         build_linux(out, version)
         build_windows(out, version)
 
-    print(f"Done → {out}")
+    print(f"Done -> {out}")
     return 0
 
 
