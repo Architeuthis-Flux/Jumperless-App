@@ -4,9 +4,20 @@
 # KevinC@ppucc.io
 #
 
-from jumperless_pkg._version import read_version
+def _read_app_version() -> str:
+    """Read VERSION from repo root (works in CI without jumperless_pkg checkout)."""
+    import os
 
-App_Version = read_version()
+    version_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+    if os.path.isfile(version_file):
+        with open(version_file, encoding="utf-8") as handle:
+            text = handle.read().strip()
+            if text:
+                return text
+    return "0.0.0"
+
+
+App_Version = _read_app_version()
 new_requirements = True
 
 

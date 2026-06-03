@@ -9,11 +9,12 @@ import shutil
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+SCRIPTS = Path(__file__).resolve().parent
+ROOT = SCRIPTS.parent
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 
-from jumperless_pkg._version import read_version  # noqa: E402
+from read_version import read_version  # noqa: E402
 
 
 def populate_jumperless_python_folder(dest: Path, root: Path | None = None) -> Path:
@@ -47,7 +48,7 @@ def populate_jumperless_python_folder(dest: Path, root: Path | None = None) -> P
         shutil.copytree(assets_src, dest / "assets", dirs_exist_ok=True)
         print(f"Copied assets/ -> {dest.name}/assets")
 
-    version = read_version(root)
+    version = read_version()
     print(f"Jumperless Python folder ready at {dest} (version {version})")
     return dest
 

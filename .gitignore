@@ -66,7 +66,9 @@ Jumperless-App.code-workspace
 arduino-cli
 
 builds/
-jumperless_pkg/
+# Generated from JumperlessWokwiBridge.py (Scripts/prepare_jumperless_pkg.py)
+jumperless_pkg/bridge.py
+jumperless_pkg/__pycache__/
 jumperlessDMG/
 
 
