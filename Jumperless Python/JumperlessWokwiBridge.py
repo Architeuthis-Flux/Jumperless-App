@@ -4,7 +4,9 @@
 # KevinC@ppucc.io
 #
 
-App_Version = "1.1.1.18"
+from jumperless_pkg._version import read_version
+
+App_Version = read_version()
 new_requirements = True
 
 
@@ -379,8 +381,34 @@ active_processes = []
 active_threads = []
 
 # Interactive mode settings
-interactive_mode = False
+#
+# The app's ONLY concern here is interactive mode: whether it forwards each
+# keystroke to the device raw (interactive ON) or reads whole lines itself with
+# readline/input() (interactive OFF). "Line buffering" is the firmware's term for
+# what it does while the app is interactive — it owns the line editor (echo /
+# history / cursor). The firmware needs the app to be in interactive mode for its
+# line buffering to work, so the two states are kept in sync over the control
+# protocol below, but the app tracks only `interactive_mode`.
+#
+# `interactive_mode` is the persistent PREFERENCE (shown in the menu, synced to
+# the device). It does NOT flip off just because the terminal is momentarily
+# cooked (e.g. while the app menu's input() is running) — that transient state is
+# `terminal_is_raw()` (interactive_mode and not menuEntered).
+#
+# Default ON: the app prefers interactive mode (firmware-side line editor with
+# echo, history, and cursor). On connect the app pushes this to the device so
+# both agree; the device can still flip it via the control protocol.
+interactive_mode = True
 original_settings = None
+
+# Interactive-mode sync protocol (a single non-printable control char, symmetric
+# in both directions):
+#   SO (0x0E) = interactive ON  (firmware turns its line buffering ON)
+#   SI (0x0F) = interactive OFF (firmware processes raw single-char commands)
+# The firmware sends these to announce its state; the app sends the same bytes
+# to request a state. No prefix/argument — the character itself is the directive.
+INTERACTIVE_ON = b'\x0e'       # SO - interactive ON
+INTERACTIVE_OFF = b'\x0f'      # SI - interactive OFF
 
 
 # Debug and configuration flags
@@ -462,10 +490,22 @@ savedProjectsFile = os.path.join(SCRIPT_DIR, "JumperlessFiles", "savedProjects.t
 latestFirmwareAddress = "https://github.com/Architeuthis-Flux/Jumperless/releases/latest/download/firmware.uf2"
 latestFirmwareAddressV5 = "https://github.com/Architeuthis-Flux/JumperlessV5/releases/latest/download/firmware.uf2"
 
+# V5-class firmware is now published to two repos (the original JumperlessV5 repo
+# and the newer JumperlOS repo). We check both and download whichever published
+# the newer release. Order doesn't matter; the newest version wins.
+firmware_repos_v5 = [
+    "Architeuthis-Flux/JumperlessV5",
+    "Architeuthis-Flux/JumperlOS",
+]
+# Resolved at version-check/download time to the winning repo's firmware.uf2 URL.
+latestFirmwareDownloadUrl = None
+latestFirmwareRepo = None
+
 # App Update URLs
 app_update_repo = "Architeuthis-Flux/JumperlessV5"  # Repository for app updates
 app_script_name = "JumperlessWokwiBridge.py"
 app_requirements_name = "requirements.txt"
+pypi_package_name = "jumperless"  # PyPI project name (used for update checks)
 
 # Debug/Testing settings for app updates
 debug_app_update = False # Set to True to use local file for testing
@@ -485,6 +525,16 @@ def resource_path(relative_path):
 
 def safe_print(message, color=None, end='\n'):
     """Cross-platform safe printing with optional color"""
+    # While the terminal is actually raw (interactive on AND not in the cooked app
+    # menu), the kernel's automatic \n -> \r\n translation is disabled. Without
+    # this, a bare \n only moves the cursor down a row (not back to column 0), so
+    # multi-line app output staircases across the screen. Re-add a carriage return
+    # before any bare \n. (Windows interactive mode doesn't raw the console.)
+    if terminal_is_raw() and sys.platform != "win32":
+        if isinstance(message, str) and '\n' in message:
+            message = re.sub(r'(?<!\r)\n', '\r\n', message)
+        if isinstance(end, str) and '\n' in end:
+            end = re.sub(r'(?<!\r)\n', '\r\n', end)
     if color and COLORS_AVAILABLE:
         print(f"{color}{message}{Style.RESET_ALL}", end=end)
     elif color and not COLORS_AVAILABLE and color != Fore.RESET:
@@ -796,7 +846,36 @@ def get_available_ports():
             
             port_list.append((device, description, hwid, interface, additional_attrs))
         
-        # On Windows, encourage release of handles from comports() enumeration
+        # Windows fallback: pyserial can miss hot-plugged ports until process restart.
+        # If comports() came back empty, synthesize entries from SetupAPI/registry.
+        if sys.platform == "win32" and not port_list:
+            try:
+                win_info = _get_all_windows_port_info()
+                if win_info:
+                    for port_name in sort_com_ports_numerically(list(win_info.keys())):
+                        info = win_info.get(port_name, {})
+                        hwid = info.get("instance_id", "")
+                        bus_desc = info.get("bus_desc")
+                        # Prefer explicit bus-reported descriptor; otherwise keep generic text.
+                        description = bus_desc or "USB Serial Device"
+                        additional_attrs = {
+                            "source": "setupapi-registry-fallback",
+                        }
+                        if "mi_number" in info:
+                            additional_attrs["mi_number"] = info["mi_number"]
+                        if bus_desc:
+                            additional_attrs["bus_desc"] = bus_desc
+                        port_list.append((port_name, description, hwid, None, additional_attrs))
+                    if debugWokwi:
+                        safe_print(
+                            f"Recovered {len(port_list)} port(s) from SetupAPI/registry fallback",
+                            Fore.CYAN
+                        )
+            except Exception as e:
+                if debugWokwi:
+                    safe_print(f"Windows fallback port enumeration failed: {e}", Fore.YELLOW)
+        
+        # On Windows, encourage release of handles from enumeration.
         if sys.platform == "win32":
             import gc
             gc.collect()
@@ -2478,9 +2557,54 @@ def _query_firmware_version_on_open_port(ser_port):
 # FIRMWARE MANAGEMENT
 # ============================================================================
 latestFirmware = "5.1.2.6"
+
+def get_latest_release_tag(repo):
+    """Return the tag (version string) of a repo's latest GitHub release.
+
+    Uses the /releases/latest redirect rather than the API so we don't burn the
+    unauthenticated API rate limit. Returns None on any failure (including a repo
+    with no published release) so callers can fall back to another source.
+    """
+    try:
+        response = requests.get(f"https://github.com/{repo}/releases/latest", timeout=10)
+        tag = response.url.rstrip('/').split('/').pop()
+        # A real release tag looks like a version ("5.7.0.3"). If there is no
+        # release the URL stays on ".../releases/latest" -> tag == "latest".
+        if tag and any(ch.isdigit() for ch in tag):
+            return tag
+    except Exception as e:
+        if debugWokwi:
+            safe_print(f"Could not fetch latest release for {repo}: {e}", Fore.YELLOW)
+    return None
+
+def get_newest_firmware_source(repos):
+    """Pick the repo with the newest firmware release.
+
+    Returns (tag, repo, download_url) for whichever repo published the highest
+    version, or (None, None, None) if none of them yield a usable release.
+    All V5-class repos publish the same 'firmware.uf2' asset, so only the repo
+    differs in the download URL.
+    """
+    best_tag = None
+    best_repo = None
+    for repo in repos:
+        tag = get_latest_release_tag(repo)
+        if not tag:
+            continue
+        # firmware_version_compare(a, b) is True when a >= b; require strictly
+        # newer so the first-listed repo wins ties.
+        if best_tag is None or (tag != best_tag and firmware_version_compare(tag, best_tag)):
+            best_tag = tag
+            best_repo = repo
+    if best_repo is None:
+        return (None, None, None)
+    download_url = f"https://github.com/{best_repo}/releases/latest/download/firmware.uf2"
+    return (best_tag, best_repo, download_url)
+
 def check_if_fw_is_old():
     """Check if firmware needs updating"""
     global currentString, jumperlessFirmwareString, jumperlessV5, noWokwiStuff, latestFirmware
+    global latestFirmwareDownloadUrl, latestFirmwareRepo
     
     if len(jumperlessFirmwareString) < 2:
         safe_print('\nCould not read FW version from the Jumperless', Fore.YELLOW)
@@ -2533,13 +2657,19 @@ def check_if_fw_is_old():
             safe_print(f"Invalid major version number: {current_list[0]}", Fore.YELLOW)
             return False
         
-        # Check latest version online
-        repo_url = ("https://github.com/Architeuthis-Flux/JumperlessV5/releases/latest" 
-                   if jumperlessV5 else 
-                   "https://github.com/Architeuthis-Flux/Jumperless/releases/latest")
-        
-        response = requests.get(repo_url, timeout=10)
-        version = response.url.split("/").pop()
+        # Check latest version online. V5-class firmware lives in two repos now
+        # (JumperlessV5 and JumperlOS); check both and use whichever published the
+        # newer release. Legacy (pre-V5) firmware stays on the original repo.
+        if jumperlessV5:
+            version, latestFirmwareRepo, latestFirmwareDownloadUrl = get_newest_firmware_source(firmware_repos_v5)
+            if version is None:
+                safe_print("Could not check the latest firmware version online", Fore.YELLOW)
+                return False
+        else:
+            response = requests.get("https://github.com/Architeuthis-Flux/Jumperless/releases/latest", timeout=10)
+            version = response.url.rstrip('/').split('/').pop()
+            latestFirmwareRepo = "Architeuthis-Flux/Jumperless"
+            latestFirmwareDownloadUrl = latestFirmwareAddress
         
         latest_list = version.split('.')
         if len(latest_list) < 3:
@@ -2560,7 +2690,8 @@ def check_if_fw_is_old():
         
         latestFirmware = version
         if latest_int > current_int:
-            safe_print(f"\nLatest firmware: {version}", Fore.MAGENTA)
+            repo_note = f"  ({latestFirmwareRepo.split('/')[-1]})" if latestFirmwareRepo else ""
+            safe_print(f"\nLatest firmware: {version}{repo_note}", Fore.MAGENTA)
             safe_print(f"Current version: {currentString}", Fore.RED)
             update_jumperless_firmware(force=False)
             return True
@@ -2583,10 +2714,15 @@ def update_jumperless_firmware(force=False):
     # if (force == False):
     safe_print("\nUpdating your Jumperless to the latest firmware: " + latestFirmware + "\n", Fore.YELLOW)
     
-    # Use timeout input - defaults to "y" after 4 seconds
-    user_response = 'y' #input_with_timeout("", timeout=4, default="y")
+    # Confirm before updating, with a 3-second timeout that defaults to "yes".
+    # force=True (explicit user-requested update) skips the prompt entirely.
+    if force:
+        user_response = 'y'
+    else:
+        safe_print("Update now? [Y] (continuing automatically in 5s, any key to skip)", Fore.CYAN)
+        user_response = input_with_timeout("> ", timeout=5, default="y")
     
-    if force or user_response.lower() in ['', 'y', 'yes']:
+    if force or user_response.strip().lower() in [ 'y', 'yes']:
         safe_print("Downloading latest firmware...", Fore.GREEN)
         
         with serial_lock:
@@ -2605,7 +2741,19 @@ def update_jumperless_firmware(force=False):
         updateInProgress = 1
         
         try:
-            firmware_url = latestFirmwareAddressV5 if jumperlessV5 else latestFirmwareAddress
+            if jumperlessV5:
+                # Prefer the source resolved by check_if_fw_is_old(); if this is a
+                # forced/manual update that didn't run the check, resolve the newest
+                # of the two V5 repos now. Fall back to the static URL if offline.
+                firmware_url = latestFirmwareDownloadUrl
+                if not firmware_url:
+                    _tag, _repo, firmware_url = get_newest_firmware_source(firmware_repos_v5)
+                if not firmware_url:
+                    firmware_url = latestFirmwareAddressV5
+            else:
+                firmware_url = latestFirmwareAddress
+            if debugWokwi:
+                safe_print(f"Downloading firmware from: {firmware_url}", Fore.BLUE)
             urlretrieve(firmware_url, "firmware.uf2")
             safe_print("Firmware downloaded successfully!", Fore.CYAN)
             
@@ -2843,6 +2991,8 @@ def update_jumperless_firmware(force=False):
             safe_print(f"Failed to download firmware: {e}", Fore.RED)
         updateInProgress = 0
         menuEntered = 0
+    else:
+        safe_print("Firmware update skipped.", Fore.YELLOW)
 
 # ============================================================================
 # APP UPDATE MANAGEMENT
@@ -2875,8 +3025,16 @@ def compare_versions(version1, version2):
         return version1 != version2
 
 def get_latest_app_version():
-    """Get the latest app version by downloading and reading the script file"""
-    return "1.1.1.1", "debug://local-file"
+    """Get the latest published app version.
+
+    Production: query the PyPI JSON API for the `jumperless` package, since the
+    app is distributed via PyPI (pip/pipx). Uses a short timeout so a slow or
+    absent network never blocks startup.
+
+    Debug (`debug_app_update`): read App_Version from a local test file instead.
+
+    Returns (version_string, project_url) or (None, None) on any failure.
+    """
     try:
         # Debug mode: read from local file
         if debug_app_update:
@@ -2934,81 +3092,29 @@ def get_latest_app_version():
                 safe_print(f"Error reading test file: {e}", Fore.RED)
                 return None, None
         
-        # Production mode: download from GitHub
-        # First get the latest release info
+        # Production mode: query the PyPI JSON API for the latest published version
         response = requests.get(
-            f"https://api.github.com/repos/{app_update_repo}/releases/latest",
-            timeout=5
+            f"https://pypi.org/pypi/{pypi_package_name}/json",
+            timeout=4,
         )
         if response.status_code != 200:
-            safe_print("Could not fetch latest release info from GitHub", Fore.YELLOW)
+            if debugWokwi:
+                safe_print(f"Could not fetch PyPI info (HTTP {response.status_code})", Fore.YELLOW)
             return None, None
         
-        release_data = response.json()
-        firmware_version = release_data.get('tag_name', '').lstrip('v')
-        release_url = release_data.get('html_url', '')
-        
-        if not firmware_version:
-            safe_print("Could not determine firmware version from release", Fore.YELLOW)
+        data = response.json()
+        latest_version = (data.get("info") or {}).get("version", "").strip()
+        if not latest_version:
+            if debugWokwi:
+                safe_print("Could not determine latest version from PyPI response", Fore.YELLOW)
             return None, None
         
-        # Download the app script to read its version
-        script_url = f"https://github.com/{app_update_repo}/releases/download/{firmware_version}/{app_script_name}"
-        
-        safe_print(f"Downloading app script to check version: {script_url}", Fore.BLUE)
-        
-        script_response = requests.get(script_url, timeout=10)
-        if script_response.status_code != 200:
-            safe_print(f"Could not download app script (HTTP {script_response.status_code})", Fore.YELLOW)
-            return None, None
-        
-        # Read the first few lines to find App_Version
-        script_content = script_response.text
-        lines = script_content.split('\n')
-        
-        app_version = None
-        for line in lines[:20]:  # Check first 20 lines
-            line = line.strip()
-            if line.startswith('App_Version') and '=' in line:
-                try:
-                    # Extract version from line like: App_Version = "1.1.1.1"
-                    version_part = line.split('=', 1)[1].strip()
-                    
-                    # Find the quoted string
-                    if '"' in version_part:
-                        # Extract content between first pair of double quotes
-                        start_quote = version_part.find('"')
-                        end_quote = version_part.find('"', start_quote + 1)
-                        if end_quote > start_quote:
-                            app_version = version_part[start_quote + 1:end_quote]
-                        else:
-                            app_version = version_part.strip('"\'').strip()
-                    elif "'" in version_part:
-                        # Extract content between first pair of single quotes
-                        start_quote = version_part.find("'")
-                        end_quote = version_part.find("'", start_quote + 1)
-                        if end_quote > start_quote:
-                            app_version = version_part[start_quote + 1:end_quote]
-                        else:
-                            app_version = version_part.strip('"\'').strip()
-                    else:
-                        # No quotes, take everything until comment or end of line
-                        app_version = version_part.split('#')[0].strip()
-                    break
-                except Exception as e:
-                    if debugWokwi:
-                        safe_print(f"Error parsing version line '{line}': {e}", Fore.YELLOW)
-                    continue
-        
-        if app_version:
-            safe_print(f"Found app version in script: {app_version}", Fore.GREEN)
-            return app_version, release_url
-        else:
-            safe_print("Could not find App_Version in downloaded script", Fore.YELLOW)
-            return None, None
+        project_url = f"https://pypi.org/project/{pypi_package_name}/"
+        return latest_version, project_url
         
     except Exception as e:
-        safe_print(f"Error checking for app updates: {e}", Fore.YELLOW)
+        if debugWokwi:
+            safe_print(f"Error checking PyPI for app updates: {e}", Fore.YELLOW)
         return None, None
 
 def is_running_from_executable():
@@ -3030,6 +3136,19 @@ def is_running_from_executable():
         return True  # If __file__ is not available, likely packaged
     
     return False
+
+def is_pip_installed():
+    """Check if we're running from a pip/pipx installed package.
+
+    These installs live under site-packages / dist-packages or a pipx venv and
+    must be upgraded via pip/pipx — never by overwriting the script in place.
+    """
+    try:
+        module_path = os.path.abspath(__file__)
+    except NameError:
+        return False
+    markers = ("site-packages", "dist-packages", os.path.join("pipx", "venvs"))
+    return any(marker in module_path for marker in markers)
 
 def check_for_app_updates():
     """Check if there's a newer version of the app available"""
@@ -3337,63 +3456,69 @@ pause
         updateInProgress = 0
 
 def update_app_if_needed():
-    """Check for and optionally perform app update"""
+    """Check PyPI for a newer release and notify / offer to update."""
     try:
-        # Check if running from executable first
-        if is_running_from_executable():
-            # For executables, just check and inform, don't attempt update
-            #safe_print("Checking for app updates...", Fore.CYAN)
-            
-            latest_version, release_url = get_latest_app_version()
-            if latest_version and compare_versions(App_Version, latest_version):
-                safe_print(f"\nNew app version available!", Fore.GREEN)
-                safe_print(f"Current version: {App_Version}", Fore.YELLOW)
-                safe_print(f"Latest version: {latest_version}", Fore.GREEN)
-                safe_print("\nRunning from packaged executable - automatic App update not supported.", Fore.YELLOW)
-                safe_print("Please download the latest version from:", Fore.CYAN)
-                safe_print("https://github.com/Architeuthis-Flux/JumperlessV5/releases/latest", Fore.RESET)
-            else:
-                safe_print(f"App is up to date (version {App_Version})", Fore.GREEN)
+        latest_version, release_url = get_latest_app_version()
+        if not latest_version:
+            # Network or parse failure — never block startup over an update check.
             return
         
-        # For script mode, use the existing update mechanism
-        if check_for_app_updates():
-            safe_print("\nWould you like to update the app now?", Fore.CYAN)
+        if not compare_versions(App_Version, latest_version):
+            safe_print(f"App is up to date (version {App_Version})", Fore.GREEN)
+            return
+        
+        # A newer version is published on PyPI.
+        safe_print(f"\nNew app version available!", Fore.GREEN)
+        safe_print(f"Current version: {App_Version}", Fore.YELLOW)
+        safe_print(f"Latest version:  {latest_version}", Fore.GREEN)
+        if release_url:
+            safe_print(f"Details: {release_url}", Fore.MAGENTA)
+        
+        # pip/pipx installs must upgrade through their package manager — check
+        # this BEFORE is_running_from_executable(), since a console-script entry
+        # point also looks like an "executable" (argv[0] has no .py suffix).
+        if is_pip_installed():
+            safe_print("\nUpgrade with:", Fore.CYAN)
+            safe_print(f"  pipx upgrade {pypi_package_name}", Fore.GREEN)
+            safe_print(f"  (or: pip install --upgrade {pypi_package_name})", Fore.GREEN)
+            return
+        
+        # Frozen/packaged executables can't self-overwrite either.
+        if is_running_from_executable():
+            safe_print("\nRunning from a packaged executable - download the latest from:", Fore.YELLOW)
+            safe_print("https://github.com/Architeuthis-Flux/JumperlessV5/releases/latest", Fore.CYAN)
+            return
+        
+        # Raw-script mode: offer the in-place self-update (legacy GitHub path).
+        safe_print("\nWould you like to update the app now?", Fore.CYAN)
+        
+        # Use simple input() instead of timeout input for better reliability
+        try:
+            user_response = input("Update now? (y/N): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            user_response = "n"
+        
+        if debugWokwi:
+            safe_print(f"User response: '{user_response}'", Fore.BLUE)
+        
+        if user_response in ['y', 'yes']:
+            safe_print("Starting app update...", Fore.GREEN)
+            success = perform_app_update()
             
-            # Use simple input() instead of timeout input for better reliability
-            try:
-                user_response = input("Update now? (y/N): ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                user_response = "n"
-            
-            if debugWokwi:
-                safe_print(f"User response: '{user_response}'", Fore.BLUE)
-            
-            if user_response in ['y', 'yes']:
-                safe_print("Starting app update...", Fore.GREEN)
-                success = perform_app_update()
-                
-                if success:
-                    # # Ask user if they want to restart immediately
-                    # try:
-                    #     restart_response = input("Restart the app now? (y/N): ").strip().lower()
-                    # except (EOFError, KeyboardInterrupt):
-                    #     restart_response = "n"
-                    
-                    # if restart_response in ['y', 'yes']:
-                    safe_print("Restarting app...", Fore.CYAN)
-                    # Restart the app
-                    try:
-                        cleanup_on_exit()
-                        os.execv(sys.executable, [sys.executable] + sys.argv)
-                    except Exception as restart_error:
-                        safe_print(f"Could not restart automatically: {restart_error}", Fore.YELLOW)
-                        safe_print("Please restart the app manually.", Fore.CYAN)
-                        sys.exit(0)
-                else:
-                    safe_print("App update failed. Continuing with current version.", Fore.YELLOW)
+            if success:
+                safe_print("Restarting app...", Fore.CYAN)
+                # Restart the app
+                try:
+                    cleanup_on_exit()
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                except Exception as restart_error:
+                    safe_print(f"Could not restart automatically: {restart_error}", Fore.YELLOW)
+                    safe_print("Please restart the app manually.", Fore.CYAN)
+                    sys.exit(0)
             else:
-                safe_print("App update skipped.", Fore.BLUE)
+                safe_print("App update failed. Continuing with current version.", Fore.YELLOW)
+        else:
+            safe_print("App update skipped.", Fore.BLUE)
                 
     except Exception as e:
         safe_print(f"Error during app update check: {e}", Fore.RED)
@@ -4299,7 +4424,7 @@ def bridge_menu():
     safe_print("\n\n         Jumperless App Menu\n", Fore.MAGENTA)
     
     safe_print(" 'menu'        to open the app menu (this menu)", Fore.BLUE)  
-    safe_print(" 'interactive' to " + ("disable" if interactive_mode else "enable") + " real-time character mode - " + ("ON" if interactive_mode else "OFF")  , Fore.RED if interactive_mode else Fore.MAGENTA)
+    safe_print(" 'interactive' to " + ("disable" if interactive_mode else "enable") + " interactive mode (real-time keys, syncs with device) - " + ("ON" if interactive_mode else "OFF")  , Fore.RED if interactive_mode else Fore.MAGENTA)
     safe_print(" 'wokwi'       to " + ("enable" if noWokwiStuff else "disable") + " Wokwi updates " + ("and just use as a terminal" if not noWokwiStuff else ""), Fore.CYAN)
     safe_print(" 'rate'        to change the Wokwi update rate" + (" (current: " + str(wokwiUpdateRate) + "s)" if wokwiUpdateRate + 0.4 else ""), Fore.GREEN)
     safe_print(" 'slots'       to assign Wokwi projects to slots - " + str(numAssignedSlots) + " assigned", Fore.YELLOW)
@@ -4343,14 +4468,17 @@ def bridge_menu():
                         safe_print("Warning: No Arduino port configured. Use 'status' to check ports.", Fore.YELLOW)
                 continue
             elif choice == 'interactive':
+                # Toggle interactive mode and push the change to the device.
                 if interactive_mode:
-                    disable_interactive_mode()
+                    set_interactive_mode(False, notify_device=True)
+                    safe_print("Interactive mode disabled", Fore.YELLOW)
                 else:
-                    if enable_interactive_mode():
-                        # Exit menu when entering interactive mode
-                        menuEntered = 0
-                        ser.write(b'm')
-                        return
+                    set_interactive_mode(True, notify_device=True)
+                    # Enabling puts the app in raw passthrough; leave the menu so
+                    # the interactive input handler can take over.
+                    menuEntered = 0
+                    ser.write(b'm')
+                    return
                 continue
             elif choice == 'debug':
                 debugWokwi = not debugWokwi
@@ -5839,18 +5967,15 @@ def serial_term_in():
                             filtered_buffer = b''
                             
                             for byte in input_buffer:
-                                if byte == 0x0E:  # SO (Shift Out) - Enable interactive mode
+                                if byte == 0x0E:  # SO - device asks for interactive ON (it line-buffers)
                                     if debugWokwi:
-                                        safe_print(f"\nReceived SO (0x0E) - Interactive mode request", end="\n\r", color=Fore.BLUE)
-                                    if not interactive_mode:
-                                        safe_print("\nInteractive mode enabled by device", end="\n\r", color=Fore.RED)
-                                        enable_interactive_mode()
-                                elif byte == 0x0F:  # SI (Shift In) - Disable interactive mode
+                                        safe_print(f"\nReceived SO (0x0E) - interactive ON", end="\n\r", color=Fore.BLUE)
+                                    # Device-initiated: sync locally, don't echo back.
+                                    set_interactive_mode(True, notify_device=False)
+                                elif byte == 0x0F:  # SI - device asks for interactive OFF
                                     if debugWokwi:
-                                        safe_print(f"\nReceived SI (0x0F) - Interactive mode disable", end="\n\r", color=Fore.BLUE)
-                                    if interactive_mode:
-                                        disable_interactive_mode()
-                                        safe_print("Interactive mode disabled by device",end="\n\r", color=Fore.GREEN)
+                                        safe_print(f"\nReceived SI (0x0F) - interactive OFF", end="\n\r", color=Fore.BLUE)
+                                    set_interactive_mode(False, notify_device=False)
                                 else:
                                     # Keep all other bytes for normal processing
                                     filtered_buffer += bytes([byte])
@@ -5898,8 +6023,20 @@ def serial_term_in():
                                     except (ValueError, IndexError):
                                         pass
                                 
-                                # Print remaining output: one write + flush reduces dropped chars on Windows
-                                if decoded_string.strip():
+                                # While the terminal is raw, the kernel's \n -> \r\n
+                                # translation is off. A bare \n then only drops the cursor
+                                # down a row without returning to column 0, so each device
+                                # line is indented further right (the "staircase"). Re-insert
+                                # a carriage return before any bare \n. Lone \r (in-place line
+                                # redraws) is left untouched.
+                                if terminal_is_raw() and '\n' in decoded_string:
+                                    decoded_string = re.sub(r'(?<!\r)\n', '\r\n', decoded_string)
+                                
+                                # Print remaining output: one write + flush reduces dropped chars on Windows.
+                                # NOTE: gate on non-empty, NOT on .strip() — a chunk that is just a
+                                # newline ("\r\n") strips to "" and would otherwise be dropped, gluing
+                                # device command output onto the previous (input) line.
+                                if decoded_string:
                                     try:
                                         sys.stdout.write(decoded_string)
                                         sys.stdout.flush()
@@ -6001,9 +6138,10 @@ def serial_term_out():
                     bridge_menu()
                     continue
                 elif output_buffer.lower() == 'interactive':
-                    # Toggle interactive mode
-                    if enable_interactive_mode():
-                        continue
+                    # Toggle interactive mode and sync the device.
+                    set_interactive_mode(not interactive_mode, notify_device=True)
+                    safe_print(f"Interactive mode {'enabled' if interactive_mode else 'disabled'}", Fore.CYAN)
+                    continue
                 elif output_buffer.lower() == 'status':
                     # Quick status check
                     safe_print(f"Interactive mode: {interactive_mode}", Fore.CYAN)
@@ -6340,22 +6478,26 @@ def main():
     active_threads.append(serial_out)
     
     time.sleep(0.1)
-    safe_print("Type 'menu' for App Menu, 'flash' to flash Arduino, 'interactive' for real-time mode", Fore.CYAN)
-    safe_print("Device can auto-enable interactive mode with SO (0x0E) and disable with SI (0x0F)", Fore.BLUE)
+    safe_print("Type 'menu' for App Menu, 'flash' to flash Arduino, 'interactive' to toggle interactive mode", Fore.CYAN)
+    safe_print("Interactive mode stays in sync with the device (SO/0x0E = on, SI/0x0F = off)", Fore.BLUE)
     
-    if sys.platform == "win32":
-        safe_print("Interactive mode available (Windows pynput - full Ctrl key support)", Fore.GREEN)
-        safe_print("For smoothest ANSI output (e.g. LED display), use Windows Terminal if available", Fore.CYAN)
-    else:
-        safe_print("Interactive mode available (Unix termios)", Fore.GREEN)
+    # if sys.platform == "win32":
+        # safe_print("Interactive mode available (Windows pynput - full Ctrl key support)", Fore.GREEN)
+        # safe_print("For smoothest ANSI output (e.g. LED display), use Windows Terminal if available", Fore.CYAN)
+    # else:
+        # safe_print("Interactive mode available (Unix termios)", Fore.GREEN)
     
     if READLINE_AVAILABLE:
-        safe_print("Use ↑/↓ arrow keys for command history, Tab for completion", Fore.BLUE)
-    # Send initial menu command
+        safe_print("Use ↑/↓ arrow keys for command history, Tab for completion", Fore.YELLOW)
+    # Sync interactive mode to the default (ON) so the app and device agree on who
+    # owns the line editor, then show the menu. The device can still flip the
+    # state later via the SO/SI control-character protocol.
+    set_interactive_mode(True, notify_device=True)
     try:
         with serial_lock:
             if ser and ser.is_open:
                 ser.write(b'm')
+                ser.write(b'\n')
     except:
         pass
     
@@ -6649,6 +6791,46 @@ def setup_tab_completion():
     except:
         pass  # Some systems might not support these options
 
+def terminal_is_raw():
+    """True only when stdin is actually in raw character mode right now.
+
+    This is the transient state (used for \\n -> \\r\\n translation), distinct from
+    the persistent `interactive_mode` preference: while the app menu is open the
+    terminal is restored to cooked mode even though interactive_mode stays True.
+    """
+    return interactive_mode and not menuEntered
+
+
+def set_interactive_mode(enabled, notify_device=True):
+    """Set the app's interactive-mode preference and keep the device in sync.
+
+    enabled       : True  -> interactive ON  (app forwards keystrokes raw; the
+                             firmware runs its line editor / "line buffering")
+                    False -> interactive OFF (app reads whole lines itself)
+    notify_device : send the SO/SI control char to the firmware. Set False when
+                    this call is *reacting* to a device-initiated SO/SI so we
+                    don't echo the change back (avoids a feedback loop).
+
+    Idempotent: setting the state we're already in is a no-op locally, so the
+    device's confirmation SO/SI (which re-enters here with notify_device=False)
+    settles cleanly.
+    """
+    if notify_device:
+        with serial_lock:
+            if serialconnected and ser and ser.is_open:
+                try:
+                    ser.write(INTERACTIVE_ON if enabled else INTERACTIVE_OFF)
+                    ser.flush()
+                except Exception as e:
+                    if debugWokwi:
+                        safe_print(f"Could not send interactive-mode request: {e}", Fore.YELLOW)
+    
+    if enabled:
+        enable_interactive_mode()
+    else:
+        disable_interactive_mode()
+
+
 def enable_interactive_mode():
     """Enable character-by-character input mode"""
     global interactive_mode, original_settings
@@ -6670,12 +6852,12 @@ def enable_interactive_mode():
         interactive_mode = True
         
         # Platform-specific messages
-        if sys.platform == "win32":
-            safe_print("\nInteractive mode ON - (Ctrl+C to exit)", Fore.BLUE)
-            safe_print("Using pynput for enhanced keyboard input (full Ctrl key support)", Fore.CYAN)
-        else:
-            safe_print("\nInteractive mode ON - (ESC to force off)", Fore.BLUE)
-            safe_print("Using termios for raw terminal input", Fore.CYAN)
+        # if sys.platform == "win32":
+        #     safe_print("\nInteractive mode ON - (Ctrl+C to exit)", Fore.BLUE)
+        #     safe_print("Using pynput for enhanced keyboard input (full Ctrl key support)", Fore.CYAN)
+        # else:
+        #     safe_print("\nInteractive mode ON - (ESC to force off)", Fore.BLUE)
+        #     safe_print("Using termios for raw terminal input", Fore.CYAN)
         
         return True
         
@@ -6702,14 +6884,56 @@ def disable_interactive_mode():
                 safe_print(f"Error restoring readline settings: {e}", Fore.YELLOW)
         
         interactive_mode = False
-        safe_print("\nInteractive mode OFF - normal line input restored\r", Fore.GREEN)
+        # safe_print("\nInteractive mode OFF - normal line input restored\r", Fore.GREEN)
         
     except Exception as e:
         safe_print(f"Error disabling interactive mode: {e}", Fore.RED)
 
+# Commands that, when typed as a whole line in interactive mode, are intercepted
+# by the app instead of being forwarded to the device. 'menu' is the gateway to
+# the full app menu.
+INTERACTIVE_APP_COMMANDS = ('menu',)
+
+
+def _enter_app_menu_from_interactive(typed_len):
+    """Open the app menu (triggered by typing 'menu') without losing the
+    interactive-mode preference.
+
+    We restore the terminal to cooked mode so the menu's input() works, and set
+    menuEntered so output is treated as cooked (no \\r\\n re-translation). We do
+    NOT clear interactive_mode — that's the persistent preference; the interactive
+    reader resumes automatically once the menu closes.
+
+    typed_len is the number of characters the user typed on the current line; we
+    send that many DELs so the device's line editor doesn't keep the echoed
+    command pending after we switch away.
+    """
+    global menuEntered, serialconnected, ser
+    
+    # Erase the echoed command from the device's line editor (firmware honors DEL).
+    if typed_len > 0:
+        with serial_lock:
+            if serialconnected and ser and ser.is_open:
+                try:
+                    ser.write(b'\x7f' * typed_len)
+                except Exception:
+                    pass
+    
+    # Restore cooked terminal so the menu's input() works (interactive_mode, the
+    # preference, stays on; menuEntered marks the terminal as currently cooked).
+    if sys.platform != "win32":
+        try:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, original_terminal_settings)
+        except Exception:
+            pass
+    
+    menuEntered = 1
+    bridge_menu()
+
+
 def handle_interactive_input_simple():
     """Simple approach using sys.stdin with raw mode"""
-    global interactive_mode, serialconnected, ser
+    global interactive_mode, serialconnected, ser, menuEntered
     
     # safe_print("Using simple character-by-character input", Fore.GREEN)
     
@@ -6718,6 +6942,9 @@ def handle_interactive_input_simple():
         import tty
         import select
         
+        # Track the current typed line so whole-line app commands (e.g. 'menu')
+        # can be caught instead of being passed through to the device.
+        line_buffer = ''
         
         try:
             # Set terminal to raw mode
@@ -6728,15 +6955,12 @@ def handle_interactive_input_simple():
                 if select.select([sys.stdin], [], [], 0.025)[0]:
                     char = sys.stdin.read(1)
                     
-                    # Handle special characters
-                    # if char == '\x1b':  # ESC key
-                        # break  # Exit the loop, disable_interactive_mode will be called below
                     if char == '\x03':  # Ctrl+C
                         raise KeyboardInterrupt
-                    elif char == '\r':
-                        char = '\n'  # Convert to newline for MicroPython compatibility
-                    if char == '\x1b':  # ESC key
+                    
+                    if char == '\x1b':  # ESC / arrow-key sequence - forward raw, reset line
                         esc_sequence = char + sys.stdin.read(2)
+                        line_buffer = ''
                         with serial_lock:
                             if serialconnected and ser and ser.is_open:
                                 try:
@@ -6744,25 +6968,50 @@ def handle_interactive_input_simple():
                                 except Exception as e:
                                     safe_print(f"Error sending character: {e}", Fore.RED)
                         continue
-                    else:
-                    # Send character to serial port
+                    
+                    if char == '\r' or char == '\n':
+                        # Enter: intercept whole-line app commands before forwarding.
+                        if line_buffer.strip().lower() in INTERACTIVE_APP_COMMANDS:
+                            _enter_app_menu_from_interactive(len(line_buffer))
+                            return
+                        line_buffer = ''
+                        with serial_lock:
+                            if serialconnected and ser and ser.is_open:
+                                try:
+                                    ser.write(b'\n')  # MicroPython expects \n
+                                except Exception as e:
+                                    safe_print(f"Error sending character: {e}", Fore.RED)
+                        continue
+                    
+                    if char in ('\x7f', '\x08'):  # Backspace / DEL
+                        line_buffer = line_buffer[:-1]
                         with serial_lock:
                             if serialconnected and ser and ser.is_open:
                                 try:
                                     ser.write(char.encode('utf-8', errors='ignore'))
                                 except Exception as e:
                                     safe_print(f"Error sending character: {e}", Fore.RED)
+                        continue
+                    
+                    # Printable character: track it for command detection, then forward.
+                    if char >= ' ':
+                        line_buffer += char
+                    with serial_lock:
+                        if serialconnected and ser and ser.is_open:
+                            try:
+                                ser.write(char.encode('utf-8', errors='ignore'))
+                            except Exception as e:
+                                safe_print(f"Error sending character: {e}", Fore.RED)
                                 
         finally:
-            # Always restore original terminal settings
+            # Always restore original terminal settings. We do NOT disable
+            # interactive_mode here: the reader also stops to show the app menu,
+            # and that must not clear the persistent preference. Real exits
+            # (Ctrl+C, errors) disable it explicitly in the handlers below.
             try:
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, original_terminal_settings)
             except:
                 pass
-            
-            # Disable interactive mode if we exited the loop
-            if interactive_mode:
-                disable_interactive_mode()
                 
     except ImportError:
         safe_print("WARNING: termios not available - cannot use interactive mode", Fore.YELLOW)
@@ -6776,7 +7025,7 @@ def handle_interactive_input_simple():
 
 def handle_interactive_input_windows():
     """Windows-specific approach using pynput for complete key support"""
-    global interactive_mode, serialconnected, ser
+    global interactive_mode, serialconnected, ser, menuEntered
     
     # Check if pynput is available
     try:
@@ -6792,6 +7041,12 @@ def handle_interactive_input_windows():
         # Create a controller instance for modifier state checking
         controller = pynput_keyboard.Controller()
         
+        # Mutable state shared with the listener callback: the current typed line
+        # (for catching whole-line app commands like 'menu') and a request flag set
+        # when such a command is seen so we can act after the listener stops.
+        win_line_buffer = ['']
+        menu_requested = [False]
+        
         def on_key_press(key):
             if not interactive_mode:
                 return False  # Stop listener
@@ -6800,16 +7055,23 @@ def handle_interactive_input_windows():
                 # Handle special keys
                 if key == pynput_keyboard.Key.esc:
                     # Send ESC sequence
+                    win_line_buffer[0] = ''
                     with serial_lock:
                         if serialconnected and ser and ser.is_open:
                             ser.write(b'\x1b')
                 elif key == pynput_keyboard.Key.enter:
+                    # Intercept whole-line app commands (e.g. 'menu') before forwarding.
+                    if win_line_buffer[0].strip().lower() in INTERACTIVE_APP_COMMANDS:
+                        menu_requested[0] = True
+                        return False  # Stop listener; menu opened after join()
+                    win_line_buffer[0] = ''
                     # Send newline
                     with serial_lock:
                         if serialconnected and ser and ser.is_open:
                             ser.write(b'\n')
                 elif key == pynput_keyboard.Key.backspace:
                     # Send backspace
+                    win_line_buffer[0] = win_line_buffer[0][:-1]
                     with serial_lock:
                         if serialconnected and ser and ser.is_open:
                             ser.write(b'\x08')
@@ -6896,6 +7158,10 @@ def handle_interactive_input_windows():
                         except:
                             pass  # Use original character if modifier check fails
                     
+                    # Track plain printable chars for whole-line command detection.
+                    if len(char_to_send) == 1 and char_to_send >= ' ':
+                        win_line_buffer[0] += char_to_send
+                    
                     # Send the character
                     with serial_lock:
                         if serialconnected and ser and ser.is_open:
@@ -6911,13 +7177,19 @@ def handle_interactive_input_windows():
         # Start listener
         with pynput_keyboard.Listener(on_press=on_key_press, suppress=False) as listener:
             listener.join()
+        
+        # If the user typed an app command (e.g. 'menu'), open the app menu now
+        # that the listener has stopped.
+        if menu_requested[0]:
+            _enter_app_menu_from_interactive(len(win_line_buffer[0]))
+            return
             
     except Exception as e:
         safe_print(f"pynput interactive mode error: {e}", Fore.RED)
         disable_interactive_mode()
-    finally:
-        if interactive_mode:
-            disable_interactive_mode()
+    # NOTE: no finally-disable here. The listener also stops to open the app menu,
+    # which must not clear the persistent interactive_mode preference; the reader
+    # resumes after the menu closes. Real exits disable it explicitly above.
 
 
 
@@ -6929,7 +7201,7 @@ def handle_interactive_input():
         # Use Windows-specific msvcrt approach
         return handle_interactive_input_windows()
     else:
-        # Use Unix/Linux/macOS termios approach
+        # Use Unix/Linux/macOS termios approach  
         return handle_interactive_input_simple()
 
 def get_command_suggestions():

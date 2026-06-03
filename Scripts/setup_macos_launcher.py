@@ -6,6 +6,8 @@ Applies the launcher script hack BEFORE code signing and notarization
 
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 def setup_macos_launcher_hack():
@@ -19,6 +21,14 @@ def setup_macos_launcher_hack():
     if not app_path.exists():
         print(f"Warning: App bundle not found at {app_path}")
         return False
+
+    version_script = Path(__file__).resolve().parent / "app_version.py"
+    if version_script.exists():
+        print("Setting app bundle version...")
+        subprocess.run(
+            [sys.executable, str(version_script), str(app_path)],
+            check=True,
+        )
     
     macos_dir = app_path / "Contents" / "MacOS"
     original_executable = macos_dir / "Jumperless"

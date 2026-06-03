@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jumperless"
-version = "1.1.1.19"
+dynamic = ["version"]
 description = "Jumperless Wokwi Bridge - Connect your Jumperless hardware to Wokwi projects and flash Arduino sketches"
 readme = "README_PYPI.md"
 requires-python = ">=3.8"
@@ -67,6 +67,9 @@ jumperless = "jumperless_pkg.cli:main"
 [tool.setuptools]
 include-package-data = true
 license-files = []
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
 
 [tool.setuptools.packages.find]
 where = ["."]

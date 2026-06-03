@@ -13,9 +13,11 @@ __pycache__/
 
 # Virtual environments
 venv/
+venv-packager/
 env/
 ENV/
 jumperless-venv/
+.cache/
 
 # PyPI distribution
 .pypirc

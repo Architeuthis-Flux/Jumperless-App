@@ -1,12 +1,12 @@
 # JumperlessWokwiBridge.py Requirements
 # Auto-generated minimal dependencies
 
-beautifulsoup4==4.13.4
+beautifulsoup4==4.14.3
 colorama==0.4.6
-packaging==24.1
+packaging==26.2
 psutil==7.2.2
 pyduinocli==0.35.0
 pyserial==3.5
-requests==2.32.3
+requests==2.34.2
 pywin32>=306; platform_system == "Windows"
 pynput; platform_system == "Windows"

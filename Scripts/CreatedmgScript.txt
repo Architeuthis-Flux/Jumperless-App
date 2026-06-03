@@ -8,7 +8,7 @@ create-dmg \
 --icon "Jumperless.app" 72 245 \
 --app-drop-link 395 245 \
 --hide-extension "Jumperless.app" \
---codesign "Kevin Cappuccio (LK2RWK9EUK)" \
+--codesign "Developer ID Application: Kevin Cappuccio (LK2RWK9EUK)" \
 --add-folder "Jumperless Python" "Jumperless Python" 69 460 \
 "Jumperless_installer_macOS.dmg" \
 "JumperlessDMG/" 

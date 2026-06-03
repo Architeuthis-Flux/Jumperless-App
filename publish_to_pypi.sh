@@ -21,23 +21,10 @@ echo -e "${NC}"
 echo ""
 
 # Step 1: Version check
-echo -e "${BLUE}Step 1: Checking version consistency...${NC}"
-PYPROJECT_VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
-BRIDGE_VERSION=$(grep '^App_Version = ' jumperless_pkg/bridge.py | head -1 | cut -d'"' -f2)
-
-echo "  pyproject.toml:  $PYPROJECT_VERSION"
-echo "  bridge.py:       $BRIDGE_VERSION"
-
-if [ "$PYPROJECT_VERSION" != "$BRIDGE_VERSION" ]; then
-    echo -e "${RED}✗ ERROR: Version mismatch!${NC}"
-    echo ""
-    echo "Please update both files to match:"
-    echo "  1. pyproject.toml line 7: version = \"X.X.X.X\""
-    echo "  2. jumperless_pkg/bridge.py line 7: App_Version = \"X.X.X.X\""
-    exit 1
-else
-    echo -e "${GREEN}✓ Versions match: $PYPROJECT_VERSION${NC}"
-fi
+echo -e "${BLUE}Step 1: Checking version...${NC}"
+VERSION=$(tr -d '[:space:]' < VERSION)
+echo "  VERSION file:    $VERSION"
+echo -e "${GREEN}✓ Release version: $VERSION${NC}"
 echo ""
 
 # Step 2: Check if bridge.py is up to date

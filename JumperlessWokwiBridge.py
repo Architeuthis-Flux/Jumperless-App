@@ -4,7 +4,9 @@
 # KevinC@ppucc.io
 #
 
-App_Version = "1.1.1.19"
+from jumperless_pkg._version import read_version
+
+App_Version = read_version()
 new_requirements = True
 
 

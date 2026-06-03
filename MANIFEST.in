@@ -1,6 +1,7 @@
 # Include documentation and license
 include README_PYPI.md
 include LICENSE
+include VERSION
 include requirements.txt
 
 # Include asset files

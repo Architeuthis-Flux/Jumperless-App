@@ -10,8 +10,7 @@ on:
 
 env:
   PYTHON_VERSION: "3.11"
-  DISABLE_MACOS_DMG: "true"  # Flag to disable DMG creation for macOS
-  DISABLE_MACOS_NOTARIZATION: "false"  # Flag to disable notarization for macOS
+  DISABLE_MACOS_NOTARIZATION: "false"
   
 jobs:
   build:
@@ -26,25 +25,7 @@ jobs:
             artifact-name: "Jumperless-Linux-x64"
             executable-name: "Jumperless"
             icon-path: "assets/icons/icon.png"
-            
 
-            
-          # macOS builds (Intel)
-          - os: macos-14
-            platform: macos
-            arch: x64
-            artifact-name: "Jumperless-macOS-Intel"
-            executable-name: "Jumperless"
-            icon-path: "assets/icons/icon.icns"
-            
-          # macOS builds (Apple Silicon)
-          - os: macos-latest
-            platform: macos
-            arch: arm64
-            artifact-name: "Jumperless-macOS-Apple-Silicon"
-            executable-name: "Jumperless"
-            icon-path: "assets/icons/icon.icns"
-            
           # Windows builds
           - os: windows-latest
             platform: windows
@@ -91,35 +72,6 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential libfuse2 desktop-file-utils
-        
-    - name: Install system dependencies (macOS)
-      if: matrix.platform == 'macos'
-      run: |
-        # Only install create-dmg if DMG creation is enabled
-        if [ "${{ env.DISABLE_MACOS_DMG }}" != "true" ]; then
-          brew install create-dmg
-        fi
-        
-    - name: Install Python dependencies (macOS - Universal binaries)
-      if: matrix.platform == 'macos'
-      run: |
-        # Set environment variables for universal binary builds
-        export ARCHFLAGS="-arch x86_64 -arch arm64"
-        export _PYTHON_HOST_PLATFORM="macosx-10.9-universal2"
-        echo "Installing dependencies with universal binary support..."
-        
-        # Install pure Python packages first
-        uv pip install --system beautifulsoup4 packaging requests pyduinocli
-        
-        # Install packages with C extensions - force rebuild from source for universal binaries
-        # Note: Using pip directly instead of uv for --no-binary flag
-        python -m pip install --no-cache-dir --no-binary :all: psutil pyserial
-        
-        # Install GUI packages (if prebuilt wheels are universal)
-        uv pip install --system PySide6 websockets
-        
-        # Install other requirements
-        uv pip install --system -r PackagingApps/packagerRequirements.txt
         
     - name: Install Python dependencies (Linux)
       if: matrix.platform == 'linux'
@@ -183,165 +135,6 @@ jobs:
         # Ensure host runner owns build artifacts created by container
         sudo chown -R $(id -u):$(id -g) dist build || true
           
-    - name: Build with PyInstaller (macOS)
-      if: matrix.platform == 'macos'
-      run: |
-        # Get absolute paths to avoid PyInstaller path issues
-        CURRENT_DIR=$(pwd)
-        echo "Current working directory: $CURRENT_DIR"
-        echo "Contents of current directory:"
-        ls -la
-        
-        # Verify dependencies are universal
-        echo "Verifying universal binaries..."
-        python -c "
-        import subprocess, glob, site
-        site_packages = site.getsitepackages()[0]
-        binaries = glob.glob(f'{site_packages}/psutil/_psutil_*.so')
-        for binary in binaries[:1]:  # Check at least one
-            result = subprocess.run(['lipo', '-info', binary], capture_output=True, text=True)
-            print(f'Checking {binary}')
-            print(result.stdout)
-            if 'x86_64' not in result.stdout or 'arm64' not in result.stdout:
-                print('WARNING: Dependencies may not be universal!')
-        "
-        
-        # Use PyInstaller with universal2 target for macOS
-        echo "Building universal binary (x86_64 + arm64) with PyInstaller"
-        python -m PyInstaller --clean --windowed --target-arch universal2 --name "Jumperless" --distpath dist/macos --workpath build/macos --icon "assets/icons/icon.icns" JumperlessWokwiBridge.py
-        
-        # Apply launcher script hack BEFORE code signing and notarization
-        echo "Setting up macOS launcher script hack BEFORE code signing..."
-        python Scripts/setup_macos_launcher.py
-        
-    - name: Code Sign macOS App
-      if: matrix.platform == 'macos'
-      env:
-        MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-        MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-      run: |
-        # Only proceed if certificate is available
-        if [ -z "$MACOS_CERTIFICATE" ]; then
-          echo "No signing certificate provided, skipping code signing"
-          exit 0
-        fi
-        
-        # Create temporary keychain
-        security create-keychain -p temp_keychain_password temp_keychain
-        security default-keychain -s temp_keychain
-        security unlock-keychain -p temp_keychain_password temp_keychain
-        
-        # Decode and import certificate
-        echo "$MACOS_CERTIFICATE" | base64 --decode > certificate.p12
-        security import certificate.p12 -k temp_keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-        
-        # Enable codesign to access the keychain
-        security set-key-partition-list -S apple-tool:,apple: -s -k temp_keychain_password temp_keychain
-        
-        # Find the app bundle
-        APP_PATH="dist/macos/Jumperless.app"
-        if [ -d "$APP_PATH" ]; then
-          echo "Signing $APP_PATH"
-          # Sign the app bundle
-          codesign --force --sign "Developer ID Application" --deep --options runtime "$APP_PATH"
-          
-          # Verify the signature
-          codesign --verify --verbose "$APP_PATH"
-          echo "Code signing completed successfully"
-        else
-          echo "App bundle not found at $APP_PATH"
-          exit 1
-        fi
-        
-        # Clean up
-        rm certificate.p12
-        security delete-keychain temp_keychain
-        
-    - name: Notarize macOS App
-      if: matrix.platform == 'macos'
-      env:
-        MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-        APPLE_ID: ${{ secrets.APPLE_ID }}
-        APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        DISABLE_MACOS_NOTARIZATION: ${{ env.DISABLE_MACOS_NOTARIZATION }}
-      run: |
-        # Check if notarization is disabled
-        if [ "$DISABLE_MACOS_NOTARIZATION" = "true" ]; then
-          echo "Notarization disabled by DISABLE_MACOS_NOTARIZATION flag"
-          exit 0
-        fi
-        
-        # Only proceed if both signing certificate and Apple ID are available
-        if [ -z "$MACOS_CERTIFICATE" ] || [ -z "$APPLE_ID" ]; then
-          echo "No signing certificate or Apple ID provided, skipping notarization"
-          exit 0
-        fi
-        
-        # Validate all required secrets are present
-        if [ -z "$APPLE_ID_PASSWORD" ]; then
-          echo "ERROR: APPLE_ID_PASSWORD secret is not set"
-          exit 1
-        fi
-        
-        if [ -z "$APPLE_TEAM_ID" ]; then
-          echo "ERROR: APPLE_TEAM_ID secret is not set"
-          exit 1
-        fi
-        
-        # Basic validation of Team ID format (should be 10 characters)
-        if [ ${#APPLE_TEAM_ID} -ne 10 ]; then
-          echo "ERROR: APPLE_TEAM_ID should be exactly 10 characters, got: ${#APPLE_TEAM_ID}"
-          exit 1
-        fi
-        
-        # Validate APPLE_ID looks like an email address (notarytool wants the Apple
-        # ID *email*, not a name/typo, and a stray space/newline will 401).
-        if [[ ! "$APPLE_ID" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
-          echo "ERROR: APPLE_ID does not look like an email address (got length ${#APPLE_ID})."
-          echo "       It must be the Apple ID email used to create the app-specific password."
-          echo "       Check the APPLE_ID secret for typos or trailing whitespace/newlines."
-          exit 1
-        fi
-        
-        # Validate APPLE_ID_PASSWORD is an app-specific password: xxxx-xxxx-xxxx-xxxx.
-        # A normal Apple ID password will not work and triggers HTTP 401.
-        if [[ ! "$APPLE_ID_PASSWORD" =~ ^[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$ ]]; then
-          echo "ERROR: APPLE_ID_PASSWORD is not in app-specific password format (xxxx-xxxx-xxxx-xxxx)."
-          echo "       Length seen: ${#APPLE_ID_PASSWORD} (a valid one is exactly 19 chars)."
-          echo "       Generate one at https://appleid.apple.com -> Sign-In and Security ->"
-          echo "       App-Specific Passwords, signed in as the SAME Apple ID as APPLE_ID."
-          exit 1
-        fi
-        
-        APP_PATH="dist/macos/Jumperless.app"
-        if [ -d "$APP_PATH" ]; then
-          echo "Creating archive for notarization"
-          ditto -c -k --keepParent "$APP_PATH" "Jumperless.zip"
-          
-                  echo "Submitting for notarization"
-        echo "================================"
-        echo "Apple ID: $APPLE_ID"
-        echo "Team ID: $APPLE_TEAM_ID"
-        echo "Password length: ${#APPLE_ID_PASSWORD} characters"
-        echo "================================"
-        
-        xcrun notarytool submit "Jumperless.zip" \
-          --apple-id "$APPLE_ID" \
-          --password "$APPLE_ID_PASSWORD" \
-          --team-id "$APPLE_TEAM_ID" \
-          --wait
-          
-          echo "Stapling notarization"
-          xcrun stapler staple "$APP_PATH"
-          
-          echo "Notarization completed successfully"
-          rm "Jumperless.zip"
-        else
-          echo "App bundle not found for notarization"
-          exit 1
-        fi
-          
     - name: Build with PyInstaller (Windows)
       if: matrix.platform == 'windows'
       run: |
@@ -362,13 +155,6 @@ jobs:
         python Scripts/package_app.py --platform linux --arch ${{ matrix.arch }} --label "${{ matrix.artifact-name }}"
       env:
         PREFER_TARGZ: "true"  # Signal to prefer tar.gz over zip for Linux
-        
-    - name: Create platform-specific package (macOS)
-      if: matrix.platform == 'macos'
-      run: |
-        python Scripts/package_app.py --platform macos --arch ${{ matrix.arch }} --label "${{ matrix.artifact-name }}"
-      env:
-        DISABLE_MACOS_DMG: ${{ env.DISABLE_MACOS_DMG }}
         
     - name: Create platform-specific package (Windows)
       if: matrix.platform == 'windows'
@@ -408,9 +194,140 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Universal macOS app + polished installer DMG (same pipeline as tools/build-macos-installer.sh)
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Cache packager venv
+      uses: actions/cache@v4
+      with:
+        path: venv-packager
+        key: macos-packager-${{ hashFiles('VERSION', 'PackagingApps/packagerRequirements.txt', 'Scripts/setup_universal_python.sh', 'Scripts/install_universal_deps.sh') }}
+        restore-keys: |
+          macos-packager-
+
+    - name: Install create-dmg
+      run: brew install create-dmg
+
+    - name: Build macOS installer
+      env:
+        SKIP_DMG_CODESIGN: ${{ secrets.MACOS_CERTIFICATE == '' && '1' || '0' }}
+      run: |
+        chmod +x tools/build-macos-installer.sh Scripts/*.sh
+        ./tools/build-macos-installer.sh --ci
+
+    - name: Code Sign macOS App
+      env:
+        MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+        MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      run: |
+        if [ -z "$MACOS_CERTIFICATE" ]; then
+          echo "No signing certificate provided, skipping code signing"
+          exit 0
+        fi
+
+        security create-keychain -p temp_keychain_password temp_keychain
+        security default-keychain -s temp_keychain
+        security unlock-keychain -p temp_keychain_password temp_keychain
+
+        echo "$MACOS_CERTIFICATE" | base64 --decode > certificate.p12
+        security import certificate.p12 -k temp_keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+        security set-key-partition-list -S apple-tool:,apple: -s -k temp_keychain_password temp_keychain
+
+        APP_PATH="dist/macos/Jumperless.app"
+        if [ -d "$APP_PATH" ]; then
+          codesign --force --sign "Developer ID Application" --deep --options runtime "$APP_PATH"
+          codesign --verify --verbose "$APP_PATH"
+        else
+          echo "App bundle not found at $APP_PATH"
+          exit 1
+        fi
+
+        rm certificate.p12
+        security delete-keychain temp_keychain
+
+    - name: Notarize macOS App
+      env:
+        MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+        APPLE_ID: ${{ secrets.APPLE_ID }}
+        APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        DISABLE_MACOS_NOTARIZATION: ${{ env.DISABLE_MACOS_NOTARIZATION }}
+      run: |
+        if [ "$DISABLE_MACOS_NOTARIZATION" = "true" ]; then
+          echo "Notarization disabled"
+          exit 0
+        fi
+        if [ -z "$MACOS_CERTIFICATE" ] || [ -z "$APPLE_ID" ]; then
+          echo "Skipping notarization (certificate or Apple ID not configured)"
+          exit 0
+        fi
+        if [ -z "$APPLE_ID_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+          echo "ERROR: APPLE_ID_PASSWORD and APPLE_TEAM_ID are required for notarization"
+          exit 1
+        fi
+        if [ ${#APPLE_TEAM_ID} -ne 10 ]; then
+          echo "ERROR: APPLE_TEAM_ID should be exactly 10 characters"
+          exit 1
+        fi
+        if [[ ! "$APPLE_ID" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
+          echo "ERROR: APPLE_ID must be an email address"
+          exit 1
+        fi
+        if [[ ! "$APPLE_ID_PASSWORD" =~ ^[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$ ]]; then
+          echo "ERROR: APPLE_ID_PASSWORD must be an app-specific password (xxxx-xxxx-xxxx-xxxx)"
+          exit 1
+        fi
+
+        APP_PATH="dist/macos/Jumperless.app"
+        ditto -c -k --keepParent "$APP_PATH" "Jumperless.zip"
+        xcrun notarytool submit "Jumperless.zip" \
+          --apple-id "$APPLE_ID" \
+          --password "$APPLE_ID_PASSWORD" \
+          --team-id "$APPLE_TEAM_ID" \
+          --wait
+        xcrun stapler staple "$APP_PATH"
+        rm "Jumperless.zip"
+
+    - name: Create installer DMG
+      env:
+        SKIP_DMG_CODESIGN: ${{ secrets.MACOS_CERTIFICATE == '' && '1' || '0' }}
+      run: ./tools/build-macos-installer.sh --ci --dmg-only
+
+    - name: Run basic smoke test
+      run: venv-packager/bin/python Scripts/smoke_test.py --platform macos
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Jumperless-macOS-Apple-Silicon
+        path: |
+          builds/Jumperless-*.zip
+          builds/Jumperless-*.dmg
+        if-no-files-found: error
+        retention-days: 90
+        compression-level: 6
+
+    - name: Upload to release (if tag)
+      if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          builds/Jumperless-*.zip
+          builds/Jumperless-*.dmg
+        tag_name: "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}"
+        draft: false
+        prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # Job to create a combined release with all platforms
   release:
-    needs: build
+    needs: [build, build-macos]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     
@@ -448,8 +365,7 @@ jobs:
           
           ### Downloads
           - **Linux x64**: Jumperless-Linux-x64 (tar.gz + Python fallback)
-          - **macOS Intel**: Jumperless-macOS-Intel (App bundle + Python fallback)
-          - **macOS Apple Silicon**: Jumperless-macOS-Apple-Silicon (App bundle + Python fallback)
+          - **macOS universal**: Jumperless-macOS-Apple-Silicon (installer DMG + zip fallback)
           - **Windows x64**: Jumperless-Windows-x64 (EXE + Python fallback)
           - **Windows x86**: Jumperless-Windows-x86 (EXE + Python fallback)
           
@@ -498,4 +414,59 @@ jobs:
         draft: false
         prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Mirror the packaged app outputs onto the public JumperlessV5 "latest" release,
+  # alongside the firmware.uf2 that the JumperlOS firmware CI publishes there. We
+  # only add/replace the app packages (*.dmg / *.zip / *.tar.gz) via --clobber and
+  # leave the release's tag, title, notes, and firmware.uf2 untouched.
+  #
+  # Requires a JUMPERLESSV5_TOKEN secret on THIS repo: a PAT with write access to
+  # Architeuthis-Flux/JumperlessV5 (fine-grained: Contents read/write on that repo,
+  # or classic: `public_repo`). When the secret is absent the upload step is
+  # skipped instead of failing.
+  publish-to-jumperlessv5:
+    needs: [build, build-macos]
+    runs-on: ubuntu-latest
+    if: github.repository == 'Architeuthis-Flux/Jumperless-App' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    env:
+      JUMPERLESSV5_TOKEN: ${{ secrets.JUMPERLESSV5_TOKEN }}
+
+    steps:
+    - name: Download all build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts/
+
+    - name: Upload app packages onto the JumperlessV5 latest release
+      # Skip gracefully when the cross-repo PAT secret isn't configured.
+      if: ${{ env.JUMPERLESSV5_TOKEN != '' }}
+      env:
+        GH_TOKEN: ${{ env.JUMPERLESSV5_TOKEN }}
+      run: |
+        set -euo pipefail
+        REPO="Architeuthis-Flux/JumperlessV5"
+
+        # Collect the packaged app outputs only (never the unpacked .app internals).
+        mapfile -t FILES < <(find artifacts -type f \( \
+          -name 'Jumperless-*.dmg' -o \
+          -name 'Jumperless-*.zip' -o \
+          -name 'Jumperless-*.tar.gz' \) | sort)
+        if [ "${#FILES[@]}" -eq 0 ]; then
+          echo "::error::No app packages (*.dmg/*.zip/*.tar.gz) found under artifacts/ to upload."
+          exit 1
+        fi
+        echo "Found ${#FILES[@]} app package(s) to publish:"
+        printf '  %s\n' "${FILES[@]}"
+
+        CUR_TAG="$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || true)"
+        if [ -z "$CUR_TAG" ]; then
+          echo "::warning::No existing JumperlessV5 release found; skipping app upload."
+          exit 0
+        fi
+        echo "Target JumperlessV5 latest release: $CUR_TAG"
+
+        # Add/replace just the app packages on the current latest release; the tag,
+        # title, notes, and firmware.uf2 asset are left exactly as they are.
+        gh release upload "$CUR_TAG" "${FILES[@]}" --repo "$REPO" --clobber
+        echo "Published app packages onto $REPO release $CUR_TAG."

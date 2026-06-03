@@ -74,28 +74,28 @@ end tell
 def create_python_fallback(platform, arch, output_dir):
     """Create Python fallback package with launcher script"""
     print(f"Creating Python fallback package for {platform}-{arch}")
-    
+
     python_dir = output_dir / "Jumperless Python"
-    python_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Copy main application
-    if Path("JumperlessWokwiBridge.py").exists():
-        shutil.copy2("JumperlessWokwiBridge.py", python_dir)
-    
-    # Copy requirements
-    if Path("requirements.txt").exists():
-        shutil.copy2("requirements.txt", python_dir)
-    
-    # Copy assets if they exist
-    if Path("assets").exists():
-        shutil.copytree("assets", python_dir / "assets", dirs_exist_ok=True)
-    
-    # Create launcher scripts
+    populate_script = Path("Scripts/populate_jumperless_python.py")
+    if populate_script.exists():
+        subprocess.run(
+            [sys.executable, str(populate_script), str(python_dir)],
+            check=True,
+        )
+    else:
+        python_dir.mkdir(parents=True, exist_ok=True)
+        if Path("JumperlessWokwiBridge.py").exists():
+            shutil.copy2("JumperlessWokwiBridge.py", python_dir)
+        if Path("requirements.txt").exists():
+            shutil.copy2("requirements.txt", python_dir)
+        if Path("VERSION").exists():
+            shutil.copy2("VERSION", python_dir)
+        if Path("assets").exists():
+            shutil.copytree("assets", python_dir / "assets", dirs_exist_ok=True)
+
     create_launcher_scripts(python_dir, platform)
-    
-    # Create README for Python fallback
     create_python_readme(python_dir, platform)
-    
+
     print(f"Python fallback package created in {python_dir}")
 
 def create_launcher_scripts(python_dir, platform):
@@ -389,78 +389,39 @@ def try_create_macos_dmg(macos_dir, arch):
         print("WARNING: create-dmg not available, skipping DMG creation")
 
 def create_macos_dmg(macos_dir, arch):
-    """Create macOS DMG"""
-    print("Creating macOS DMG...")
-    
-    # Write the DMG into builds/ (next to the archives) so the workflow's
-    # release globs (builds/Jumperless-*.dmg) pick it up.
-    dmg_name = str(macos_dir.parent / f"Jumperless-macOS-{arch}.dmg")
-    
-    # Create a temp directory without spaces for create-dmg
-    temp_dir = Path(f"temp_dmg_{arch}")
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
-    temp_dir.mkdir()
-    
+    """Create macOS installer DMG via Scripts/createDMG.sh (same layout as local builds)."""
+    print("Creating macOS installer DMG...")
+
+    root = Path.cwd()
+    staging = root / "JumperlessDMG"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir()
+
+    app_src = macos_dir / "Jumperless.app"
+    python_src = macos_dir / "Jumperless Python"
+    if not app_src.exists():
+        raise FileNotFoundError(f"Jumperless.app not found in {macos_dir}")
+
+    shutil.copytree(app_src, staging / "Jumperless.app")
+    if python_src.exists():
+        shutil.copytree(python_src, staging / "Jumperless Python")
+
+    # builds/Jumperless-Installer.dmg matches release globs (builds/Jumperless-*.dmg).
+    output = macos_dir.parent / "Jumperless-Installer.dmg"
+    script = root / "Scripts" / "createDMG.sh"
+    env = os.environ.copy()
+    env["JUMPERLESS_DMG_STAGING"] = str(staging)
+    env["JUMPERLESS_DMG_OUTPUT"] = str(output)
+
     try:
-        # Copy contents to temp directory 
-        python_fallback_dir = None
-        for item in macos_dir.iterdir():
-            if item.is_dir():
-                if "Python" in item.name:
-                    # Keep track of Python fallback directory, but rename for DMG
-                    python_fallback_dir = "JumperlessPython"
-                    shutil.copytree(item, temp_dir / python_fallback_dir)
-                else:
-                    shutil.copytree(item, temp_dir / item.name)
-            else:
-                shutil.copy2(item, temp_dir)
-        
-        # Copy DMG assets if they exist
-        icon_path = Path("assets/icons/icon.icns")
-        background_path = Path("JumperlessWokwiDMGwindow4x.png")
-        
-        if icon_path.exists():
-            shutil.copy2(icon_path, temp_dir / "icon.icns")
-        if background_path.exists():
-            shutil.copy2(background_path, temp_dir / "JumperlessWokwiDMGwindow4x.png")
-        
-        # Build DMG creation command
-        cmd = [
-            "create-dmg",
-            "--volname", "Jumperless",
-            "--window-size", "600", "400",
-            "--icon-size", "100",
-            "--app-drop-link", "450", "200",
-        ]
-        
-        # Add optional parameters if assets exist
-        if (temp_dir / "icon.icns").exists():
-            cmd.extend(["--volicon", str(temp_dir / "icon.icns")])
-        if (temp_dir / "JumperlessWokwiDMGwindow4x.png").exists():
-            cmd.extend(["--background", str(temp_dir / "JumperlessWokwiDMGwindow4x.png")])
-        
-        # Add app icon positioning if .app bundle exists
-        if (temp_dir / "Jumperless.app").exists():
-            cmd.extend(["--icon", "Jumperless.app", "150", "200"])
-            cmd.extend(["--hide-extension", "Jumperless.app"])
-        
-        # Add Python fallback folder if it exists
-        if python_fallback_dir and (temp_dir / python_fallback_dir).exists():
-            cmd.extend(["--add-folder", python_fallback_dir, python_fallback_dir, "150", "320"])
-        
-        # Add DMG name and source directory
-        cmd.extend([dmg_name, str(temp_dir)])
-
-        subprocess.run(cmd, check=True)
-        print(f"DMG created: {dmg_name}")
-
+        subprocess.run(["bash", str(script)], check=True, env=env)
+        print(f"DMG created: {output}")
     except subprocess.CalledProcessError as e:
         print(f"Warning: DMG creation failed: {e}")
     finally:
-        # Clean up temp directory
-        if temp_dir.exists():
-            shutil.rmtree(temp_dir)
+        if staging.exists():
+            shutil.rmtree(staging)
 
 def create_platform_readme(platform_dir, platform):
     """Create main README for platform"""

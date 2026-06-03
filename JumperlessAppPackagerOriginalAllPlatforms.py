@@ -3,6 +3,7 @@ import pathlib
 import os
 import platform
 import shutil
+import sys
 import time
 import subprocess
 import tarfile
@@ -86,7 +87,7 @@ def check_and_update_requirements():
         
         # Get current pip freeze output
         result = subprocess.run([
-            "python3", "-m", "pip", "freeze"
+            sys.executable, "-m", "pip", "freeze"
         ], capture_output=True, text=True, check=True)
         
         all_installed = result.stdout.strip().splitlines()
@@ -237,71 +238,106 @@ def check_and_update_requirements():
         print(f"❌ Error checking requirements: {e}")
         return False
 
-def check_universal_dependencies():
-    """Check if Python dependencies are universal binaries (x86_64 + arm64)"""
-    import sys
-    import site
-    
-    print("\n=== Checking Universal Binary Support ===")
-    
-    # Check Python itself
-    python_exe = sys.executable
+def _lipo_architectures(binary_path):
+    """Return architecture names reported by lipo, or an empty set."""
     try:
-        import subprocess
-        result = subprocess.run(['lipo', '-info', python_exe], 
-                              capture_output=True, text=True)
-        if 'x86_64' in result.stdout and 'arm64' in result.stdout:
-            print("✅ Python is universal (x86_64 + arm64)")
-        else:
-            print(f"⚠️  Python architecture: {result.stdout.strip()}")
-            print("   Warning: Python may not be universal")
-    except Exception as e:
-        print(f"⚠️  Could not check Python architecture: {e}")
-    
-    # Check key dependencies with binary extensions
+        result = subprocess.run(
+            ["lipo", "-info", binary_path],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return set()
+
+    output = result.stdout.strip()
+    if "Architectures in the fat file:" in output and " are:" in output:
+        arch_part = output.rsplit(" are:", 1)[-1]
+        return set(arch_part.split())
+    if "Non-fat file:" in output and "architecture:" in output:
+        return {output.rsplit("architecture:", 1)[-1].strip()}
+    return set()
+
+
+def choose_macos_target_arch():
+    """Pick PyInstaller --target-arch based on the active Python interpreter."""
+    py_archs = _lipo_architectures(sys.executable)
+    if "x86_64" in py_archs and "arm64" in py_archs:
+        return "universal2", "Python is universal (x86_64 + arm64)"
+    if "arm64" in py_archs:
+        return (
+            "arm64",
+            "Python is arm64-only — building an Apple Silicon app. "
+            "Run ./Scripts/setup_universal_python.sh for Intel + Apple Silicon builds.",
+        )
+    if "x86_64" in py_archs:
+        return (
+            "x86_64",
+            "Python is x86_64-only — building an Intel Mac app. "
+            "Run ./Scripts/setup_universal_python.sh for Intel + Apple Silicon builds.",
+        )
+    return None, f"Could not determine Python architecture from: {py_archs or 'unknown'}"
+
+
+def check_universal_dependencies():
+    """Verify native deps match the requested macOS target architecture."""
+    import site
+    import glob
+
+    print("\n=== Checking macOS Build Architecture ===")
+    target_arch, arch_note = choose_macos_target_arch()
+    if target_arch is None:
+        print(f"❌ {arch_note}")
+        return False, None
+
+    print(f"🎯 PyInstaller target: {target_arch}")
+    print(f"   {arch_note}")
+
+    if target_arch != "universal2":
+        print("\n✅ Single-arch build — skipping universal dependency audit.\n")
+        return True, target_arch
+
+    print("\n=== Checking Universal Binary Support ===")
     site_packages = site.getsitepackages()[0]
     dependencies_to_check = [
-        ('psutil', '_psutil_osx*.so'),
-        ('psutil', '_psutil_posix*.so'),
+        ("psutil", "_psutil_osx*.so"),
+        ("psutil", "_psutil_posix*.so"),
     ]
-    
+
     all_universal = True
     for package, pattern in dependencies_to_check:
-        import glob
         binaries = glob.glob(os.path.join(site_packages, package, pattern))
-        if binaries:
-            for binary in binaries:
-                try:
-                    result = subprocess.run(['lipo', '-info', binary], 
-                                          capture_output=True, text=True)
-                    if 'x86_64' in result.stdout and 'arm64' in result.stdout:
-                        print(f"✅ {os.path.basename(binary)} is universal")
-                    else:
-                        print(f"❌ {os.path.basename(binary)}: {result.stdout.strip()}")
-                        all_universal = False
-                except Exception as e:
-                    print(f"⚠️  Could not check {binary}: {e}")
-    
+        for binary in binaries:
+            archs = _lipo_architectures(binary)
+            if "x86_64" in archs and "arm64" in archs:
+                print(f"✅ {os.path.basename(binary)} is universal")
+            else:
+                print(f"❌ {os.path.basename(binary)}: {archs or 'unknown'}")
+                all_universal = False
+
     if not all_universal:
         print("\n⚠️  WARNING: Some dependencies are not universal binaries!")
-        print("   The resulting app will only work on the current architecture.")
-        print("   To create a universal app, run:")
-        print("   ./Scripts/install_universal_deps.sh")
+        print("   Re-run ./Scripts/install_universal_deps.sh or build arm64-only instead.")
+        noninteractive = os.environ.get("JUMPERLESS_NONINTERACTIVE", "").lower() in ("1", "true", "yes")
+        if noninteractive:
+            print("   Non-interactive mode — aborting.")
+            return False, None
         response = input("\n   Continue anyway? (y/n): ")
-        if response.lower() != 'y':
-            return False
+        if response.lower() != "y":
+            return False, None
     else:
-        print("\n✅ All dependencies are universal - ready to build universal app!\n")
-    
-    return True
+        print("\n✅ Dependencies look universal — ready to build universal2 app!\n")
+
+    return True, target_arch
 
 def package_macos():
     """Package for macOS"""
     print("=== Packaging for macOS ===")
     
-    # Check if dependencies are universal before building
-    if not check_universal_dependencies():
-        print("❌ Packaging cancelled - please install universal dependencies first")
+    # Check architecture / deps before building
+    deps_ok, target_arch = check_universal_dependencies()
+    if not deps_ok:
+        print("❌ Packaging cancelled - fix dependencies or use a matching Python build")
         return False
     
     # Get the absolute path to the icon for PyInstaller
@@ -316,16 +352,38 @@ def package_macos():
         icon_arg = f'--icon="{icon_abs_path}"'
         print(f"Using icon: {icon_abs_path}")
     
-    # Build as universal2 (x86_64 + arm64) for macOS
-    pyinstaller_cmd = f"python3 -m PyInstaller {icon_arg} -y --console --windowed --target-arch universal2 JumperlessWokwiBridge.py --name Jumperless"
+    # urllib3 optionally imports brotli; exclude it so stray arm64-only installs
+    # don't break universal2 builds (brotli is not in our requirements).
+    exclude_args = "--exclude-module brotli --exclude-module brotlicffi"
+    version_data = f'"{current_path / "VERSION"}:."'
+    pyinstaller_cmd = (
+        f'"{sys.executable}" -m PyInstaller {icon_arg} -y --console --windowed '
+        f"--target-arch {target_arch} {exclude_args} "
+        f'--add-data {version_data} '
+        f"JumperlessWokwiBridge.py --name Jumperless"
+    )
     
     print(f"Running PyInstaller command: {pyinstaller_cmd}")
-    print("Building universal binary (x86_64 + arm64)...")
+    if target_arch == "universal2":
+        print("Building universal binary (x86_64 + arm64)...")
+    else:
+        print(f"Building {target_arch} binary...")
     result = os.system(pyinstaller_cmd)
     
     if result != 0:
         print("❌ PyInstaller failed!")
         return False
+
+    print("Setting app bundle version...")
+    version_script = current_path / "Scripts" / "app_version.py"
+    if version_script.exists() and appdist_path.exists():
+        subprocess.run(
+            [sys.executable, str(version_script), str(appdist_path)],
+            check=True,
+            cwd=current_path,
+        )
+    else:
+        print("⚠️  Skipping version patch — app bundle or app_version.py not found")
 
     time.sleep(4)
 
@@ -373,208 +431,54 @@ def package_macos():
     shutil.copytree(appdist_path, dmg_folder, dirs_exist_ok=True)
     print("Copied " + str(app_path) + " to " + str(dmg_folder) + '\n')
 
-    print("Updating Python files in DMG...")
-    # Create Python folder if it doesn't exist
-    python_folder.mkdir(parents=True, exist_ok=True)
-    
-    # Clear existing Python folder contents
-    if python_folder.exists():
-        shutil.rmtree(python_folder)
-        print("Cleared existing Python folder contents")
-    python_folder.mkdir(parents=True, exist_ok=True)
-    
-    # Look for Python launcher tar.gz file
-    python_launcher_archives = [
-        current_path / "Jumperless_python_launcher.tar.gz",
-        current_path / "Jumperless_Python_Launcher_macOS.tar.gz",
-        current_path / "Jumperless_Python_Launcher.tar.gz"
-    ]
-    
-    archive_found = False
-    for archive_path in python_launcher_archives:
-        if archive_path.exists():
-            print(f"Found Python launcher archive: {archive_path}")
-            try:
-                with tarfile.open(archive_path, 'r:gz') as tar:
-                    # Safety check: ensure all members are safe to extract
-                    def is_within_directory(directory, target):
-                        abs_directory = os.path.abspath(directory)
-                        abs_target = os.path.abspath(target)
-                        prefix = os.path.commonpath([abs_directory, abs_target])
-                        return prefix == abs_directory
-                    
-                    def safe_extract(tar, path=".", members=None, *, numeric_owner=False):
-                        for member in tar.getmembers():
-                            member_path = os.path.join(path, member.name)
-                            if not is_within_directory(path, member_path):
-                                raise Exception(f"Attempted path traversal in tar file: {member.name}")
-                        tar.extractall(path, members, numeric_owner=numeric_owner)
-                    
-                    # Extract safely to a temporary directory first
-                    temp_extract_dir = python_folder / "temp_extract"
-                    temp_extract_dir.mkdir(exist_ok=True)
-                    safe_extract(tar, temp_extract_dir)
-                    
-                    # Find the extracted directory and move its contents up one level
-                    extracted_items = list(temp_extract_dir.iterdir())
-                    
-                    # Find the main content directory (ignore resource fork files starting with ._)
-                    content_dirs = [item for item in extracted_items if item.is_dir() and not item.name.startswith('._')]
-                    
-                    if len(content_dirs) == 1:
-                        # Single content directory found - move its contents to python_folder
-                        source_dir = content_dirs[0]
-                        print(f"Flattening directory structure from {source_dir.name}")
-                        for item in source_dir.iterdir():
-                            # Skip resource fork files
-                            if item.name.startswith('._'):
-                                continue
-                                
-                            dest_path = python_folder / item.name
-                            try:
-                                if item.is_dir():
-                                    shutil.move(str(item), str(dest_path))
-                                else:
-                                    shutil.move(str(item), str(dest_path))
-                                print(f"Moved: {item.name}")
-                            except Exception as e:
-                                print(f"Warning: Could not move {item.name}: {e}")
-                                # Try copying instead
-                                try:
-                                    if item.is_dir():
-                                        shutil.copytree(item, dest_path, dirs_exist_ok=True)
-                                    else:
-                                        shutil.copy2(item, dest_path)
-                                    print(f"Copied: {item.name}")
-                                except Exception as e2:
-                                    print(f"Error copying {item.name}: {e2}")
-                    else:
-                        # Multiple content directories or no clear main directory - move all non-resource-fork items
-                        print("Moving all extracted contents to Python folder")
-                        for item in extracted_items:
-                            # Skip resource fork files
-                            if item.name.startswith('._'):
-                                continue
-                                
-                            dest_path = python_folder / item.name
-                            try:
-                                if item.is_dir():
-                                    shutil.move(str(item), str(dest_path))
-                                else:
-                                    shutil.move(str(item), str(dest_path))
-                                print(f"Moved: {item.name}")
-                            except Exception as e:
-                                print(f"Warning: Could not move {item.name}: {e}")
-                                # Try copying instead
-                                try:
-                                    if item.is_dir():
-                                        shutil.copytree(item, dest_path, dirs_exist_ok=True)
-                                    else:
-                                        shutil.copy2(item, dest_path)
-                                    print(f"Copied: {item.name}")
-                                except Exception as e2:
-                                    print(f"Error copying {item.name}: {e2}")
-                    
-                    # Clean up temporary directory
-                    try:
-                        shutil.rmtree(temp_extract_dir)
-                    except Exception as e:
-                        print(f"Warning: Could not clean up temp directory: {e}")
-                    
-                    # Make any .sh files executable in the final location
-                    for root, dirs, files in os.walk(python_folder):
-                        for file in files:
-                            if file.endswith('.sh'):
-                                file_path = pathlib.Path(root) / file
-                                try:
-                                    os.chmod(file_path, 0o755)
-                                    rel_path = file_path.relative_to(current_path)
-                                    print(f"Made executable: {rel_path}")
-                                except Exception as e:
-                                    print(f"Warning: Could not make {file} executable: {e}")
-                    
-                print(f"✅ Extracted Python launcher contents from {archive_path.name}")
-                archive_found = True
-                break
-            except Exception as e:
-                print(f"❌ Error extracting {archive_path.name}: {e}")
-                continue
-    
-    if not archive_found:
-        print("⚠️  No Python launcher archive found, falling back to manual file copying...")
-        
-        # Fallback: Copy individual files manually
-        main_script = current_path / "JumperlessWokwiBridge.py"
-        requirements_file = current_path / "requirements.txt"
-        launcher_script = current_path / "Scripts" / "jumperless_launcher.sh"
-        
-        if main_script.exists():
-            shutil.copy2(main_script, python_folder)
-            print("Copied JumperlessWokwiBridge.py")
-        else:
-            print("⚠️  JumperlessWokwiBridge.py not found in current directory")
-        
-        if requirements_file.exists():
-            shutil.copy2(requirements_file, python_folder)
-            print("Copied requirements.txt")
-        else:
-            print("⚠️  requirements.txt not found in current directory")
-        
-        if launcher_script.exists():
-            shutil.copy2(launcher_script, python_folder)
-            os.chmod(python_folder / "jumperless_launcher.sh", 0o755)
-            print("Copied and made executable jumperless_launcher.sh")
-        else:
-            print("⚠️  jumperless_launcher.sh not found in Scripts directory")
-    
+    print("Updating Python fallback folder...")
+    populate_script = current_path / "Scripts" / "populate_jumperless_python.py"
+    if not populate_script.exists():
+        print(f"❌ {populate_script} not found")
+        return False
+    result = subprocess.run(
+        [sys.executable, str(populate_script), str(python_folder)],
+        cwd=current_path,
+        check=False,
+    )
+    if result.returncode != 0:
+        print("❌ Failed to populate Jumperless Python folder")
+        return False
+
     print("Updated Python files in " + str(python_folder) + '\n')
 
+    if os.environ.get("JUMPERLESS_SKIP_DMG", "").lower() in ("1", "true", "yes"):
+        print("Skipping DMG creation (JUMPERLESS_SKIP_DMG set)")
+        print("✅ macOS packaging completed!")
+        return True
+
+    print("Staging DMG folder...")
+    dmg_staging_root = current_path / "JumperlessDMG"
+    dmg_staging_root.mkdir(parents=True, exist_ok=True)
+    dmg_python_staging = dmg_staging_root / "Jumperless Python"
+    if dmg_python_staging.exists():
+        shutil.rmtree(dmg_python_staging)
+    if python_folder.exists():
+        shutil.copytree(python_folder, dmg_python_staging)
+        print(f"Copied {python_folder} -> {dmg_python_staging}")
+
     print("Creating DMG installer...")
-    
-    # Copy necessary files for DMG creation to current directory temporarily
-    temp_icon_path = current_path / "icon.icns"
-    temp_background_path = current_path / "JumperlessWokwiDMGwindow4x.png"
-    
-    # Copy icon file
-    if icon_abs_path.exists():
-        shutil.copy2(icon_abs_path, temp_icon_path)
-        print(f"Copied icon for DMG creation: {temp_icon_path}")
-    
-    # Copy background image if it exists
-    background_source = current_path / "JumperlessWokwiDMGwindow4x.png"
-    if background_source.exists():
-        # Background is already in the right place
-        print(f"DMG background image found: {background_source}")
+    create_dmg_script = current_path / "Scripts" / "createDMG.sh"
+    if not create_dmg_script.exists():
+        print(f"❌ createDMG.sh script not found at {create_dmg_script}")
+        return False
+
+    os.chmod(create_dmg_script, 0o755)
+    dmg_output = os.environ.get("JUMPERLESS_DMG_OUTPUT", str(current_path / "Jumperless_Installer.dmg"))
+    env = os.environ.copy()
+    env["JUMPERLESS_DMG_STAGING"] = str(dmg_staging_root)
+    env["JUMPERLESS_DMG_OUTPUT"] = dmg_output
+    result = subprocess.run(["bash", str(create_dmg_script)], env=env, cwd=current_path)
+    if result.returncode == 0:
+        print(f"✅ DMG created successfully: {dmg_output}")
     else:
-        # Look for it in assets directory
-        background_assets = current_path / "assets" / "JumperlessWokwiDMGwindow4x.png"
-        if background_assets.exists():
-            shutil.copy2(background_assets, temp_background_path)
-            print(f"Copied background for DMG creation: {temp_background_path}")
-        else:
-            print("Warning: DMG background image not found")
-    
-    # Remove old DMG if it exists
-    os.system("rm -f Jumperless_installer_macOS.dmg")
-    
-    # Make createDMG.sh executable and run it
-    createDMG_script = current_path / "Scripts" / "createDMG.sh"
-    if createDMG_script.exists():
-        os.chmod(createDMG_script, 0o755)
-        result = os.system(f"cd '{current_path}' && '{createDMG_script}'")
-        
-        # Clean up temporary files
-        if temp_icon_path.exists() and temp_icon_path != icon_abs_path:
-            os.remove(temp_icon_path)
-            print("Cleaned up temporary icon file")
-        
-        if result == 0:
-            print("✅ DMG created successfully!")
-        else:
-            print("⚠️  DMG creation may have failed")
-    else:
-        print(f"❌ createDMG.sh script not found at {createDMG_script}")
-        print("Skipping DMG creation")
+        print("❌ DMG creation failed")
+        return False
     
     print("✅ macOS packaging completed!")
     return True
@@ -1906,6 +1810,20 @@ Visit: https://github.com/Architeuthis-Flux/JumperlessV5
         print(f"❌ Error creating Linux Python package: {e}")
         return False
 
+def run_macos_installer_build():
+    """Non-interactive macOS app + DMG build (used by tools/build-macos-installer.sh)."""
+    os.environ.setdefault("JUMPERLESS_NONINTERACTIVE", "1")
+    requirements_changed = check_and_update_requirements()
+    if requirements_changed:
+        print("\n🔄 Requirements updated - new dependencies will be included in app updates")
+    print("\n" + "=" * 50)
+    print("🍎 Building macOS app + installer DMG")
+    print("=" * 50 + "\n")
+    if not package_macos():
+        sys.exit(1)
+    print("\n🎉 macOS installer build complete!")
+
+
 def main():
     """Main packaging function"""
     # Check and update requirements first
@@ -2011,4 +1929,7 @@ def main():
         print("This packager supports macOS, Linux, and Windows.")
 
 if __name__ == "__main__":
-    main() 
+    if len(sys.argv) > 1 and sys.argv[1] in ("--macos-installer", "--macos-dmg"):
+        run_macos_installer_build()
+    else:
+        main() 
