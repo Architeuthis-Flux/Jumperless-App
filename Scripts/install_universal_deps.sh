@@ -71,22 +71,6 @@ echo ""
 echo "Installing packages with C extensions (building from source for universal binaries)..."
 PIP install --no-cache-dir --no-binary :all: psutil pyserial
 
-# PySide6 is tricky - try to install, but it may only have prebuilt wheels
-echo ""
-echo "Installing PySide6 (GUI support)..."
-# First try with prebuilt wheels (they should be universal on modern versions)
-PIP install --no-cache-dir "PySide6>=6.6.0" "websockets>=12.0" || {
-    echo "⚠️  Warning: Could not install PySide6. GUI version may not work."
-}
-
-# Install platform-specific packages
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    echo ""
-    echo "Installing macOS-specific packages..."
-    # pyobjc packages should be universal on modern macOS
-    PIP install --no-cache-dir pyobjc-framework-Cocoa 2>/dev/null || echo "⚠️  Could not install pyobjc (optional)"
-fi
-
 echo ""
 echo "================================"
 echo "Verifying Installation"

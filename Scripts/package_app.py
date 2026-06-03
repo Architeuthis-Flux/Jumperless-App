@@ -564,6 +564,9 @@ def main():
                         help="Release-asset base name (e.g. Jumperless-macOS-Apple-Silicon). "
                              "Must be unique per platform+arch; defaults to "
                              "Jumperless-<Platform>-<arch>.")
+    parser.add_argument("--output-dir", default=None,
+                        help="Where packaged archives/installers are written "
+                             "(default: $JUMPERLESS_OUTPUT_DIR or 'builds').")
     
     args = parser.parse_args()
     
@@ -574,9 +577,9 @@ def main():
     print(f"Packaging Jumperless for {args.platform}-{args.arch} (asset: {label})")
     print("=" * 60)
     
-    # Create output directory
-    output_dir = Path("builds")
-    output_dir.mkdir(exist_ok=True)
+    # Output dir precedence: --output-dir > $JUMPERLESS_OUTPUT_DIR > builds
+    output_dir = Path(args.output_dir or os.environ.get("JUMPERLESS_OUTPUT_DIR") or "builds")
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     # Platform-specific packaging
     package_platform(args.platform, args.arch, output_dir)

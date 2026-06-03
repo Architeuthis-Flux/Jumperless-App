@@ -46,13 +46,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = [
-    "PySide6>=6.6.0",
-    "websockets>=12.0",
-]
 dev = [
     "build>=1.0.0",
     "twine>=4.0.0",
+    "pyinstaller>=6.15",
 ]
 
 [project.urls]

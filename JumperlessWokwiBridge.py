@@ -5,15 +5,39 @@
 #
 
 def _read_app_version() -> str:
-    """Read VERSION from repo root (works in CI without jumperless_pkg checkout)."""
-    import os
+    """Resolve the app version across every run mode.
 
-    version_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
-    if os.path.isfile(version_file):
-        with open(version_file, encoding="utf-8") as handle:
-            text = handle.read().strip()
-            if text:
-                return text
+    Order: a VERSION file next to this script / frozen exe / PyInstaller bundle
+    (source + native builds), then installed package metadata (pip / pipx / uv
+    tool installs, where no VERSION sits beside bridge.py), then a safe default.
+    """
+    import os
+    import sys
+
+    candidates = [os.path.dirname(os.path.abspath(__file__))]
+    if getattr(sys, "frozen", False):
+        candidates.append(os.path.dirname(os.path.abspath(sys.executable)))
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(meipass)
+
+    for base in candidates:
+        version_file = os.path.join(base, "VERSION")
+        if os.path.isfile(version_file):
+            with open(version_file, encoding="utf-8") as handle:
+                text = handle.read().strip()
+                if text:
+                    return text
+
+    try:
+        from importlib.metadata import version
+
+        text = version("jumperless").strip()
+        if text:
+            return text
+    except Exception:
+        pass
+
     return "0.0.0"
 
 
@@ -3158,7 +3182,12 @@ def is_pip_installed():
         module_path = os.path.abspath(__file__)
     except NameError:
         return False
-    markers = ("site-packages", "dist-packages", os.path.join("pipx", "venvs"))
+    markers = (
+        "site-packages",
+        "dist-packages",
+        os.path.join("pipx", "venvs"),
+        os.path.join("uv", "tools"),  # `uv tool install` layout
+    )
     return any(marker in module_path for marker in markers)
 
 def check_for_app_updates():
@@ -3490,7 +3519,8 @@ def update_app_if_needed():
         # point also looks like an "executable" (argv[0] has no .py suffix).
         if is_pip_installed():
             safe_print("\nUpgrade with:", Fore.CYAN)
-            safe_print(f"  pipx upgrade {pypi_package_name}", Fore.GREEN)
+            safe_print(f"  uv tool upgrade {pypi_package_name}", Fore.GREEN)
+            safe_print(f"  (or: pipx upgrade {pypi_package_name})", Fore.GREEN)
             safe_print(f"  (or: pip install --upgrade {pypi_package_name})", Fore.GREEN)
             return
         
@@ -6322,10 +6352,42 @@ def construct_jumperless_command(connections, is_jumperless_v5):
 # MAIN EXECUTION
 # ============================================================================
 
+def emit_update_check_line():
+    """Print a single machine-readable update-status line and return.
+
+    Consumed by the uv backup launcher (`jumperless --check-update`) to decide
+    whether to run `uv tool upgrade jumperless`. Output is stable and parseable:
+        current=<ver> latest=<ver|unknown> outdated=<true|false>
+    """
+    current = App_Version
+    try:
+        latest_version, _url = get_latest_app_version()
+    except Exception:
+        latest_version = None
+
+    if not latest_version:
+        print(f"current={current} latest=unknown outdated=false")
+        return 0
+
+    outdated = False
+    try:
+        outdated = bool(compare_versions(current, latest_version))
+    except Exception:
+        outdated = False
+
+    print(f"current={current} latest={latest_version} outdated={'true' if outdated else 'false'}")
+    return 0
+
+
 def main():
     """Main application entry point"""
     global menuEntered, noWokwiStuff, currentSlotUpdate, forceWokwiUpdate
     global lastDiagram, diagram, serialconnected, ser, justreconnected, portName
+
+    # Fast, side-effect-free update probe for the backup launcher. Must run
+    # before any banner / serial / hardware initialization.
+    if "--check-update" in sys.argv:
+        return emit_update_check_line()
     
     # Initialize command history
     setup_command_history()

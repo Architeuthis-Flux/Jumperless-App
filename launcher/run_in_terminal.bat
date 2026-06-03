@@ -1,20 +1,9 @@
 @echo off
-REM Open Windows Terminal and run jumperless (pipx app directly if installed).
+REM Open Windows Terminal (or cmd) and run the uv bootstrap, which installs/
+REM upgrades jumperless from PyPI via uv and then launches it.
 setlocal EnableExtensions
 
-set "HOME_DIR=%USERPROFILE%"
-set "APP=%HOME_DIR%\pipx\venvs\jumperless\Scripts\jumperless.exe"
 set "BOOTSTRAP=%~1"
-
-if exist "%APP%" (
-  where wt >nul 2>&1
-  if %ERRORLEVEL%==0 (
-    start "" wt.exe -w 0 -d "%HOME_DIR%" nt --hold --title "Jumperless" -- "%APP%"
-    exit /b 0
-  )
-  start "Jumperless" cmd /k cd /d "%HOME_DIR%" ^&^& "%APP%"
-  exit /b 0
-)
 
 if not exist "%BOOTSTRAP%" (
   echo Bootstrap script not found: %BOOTSTRAP%
@@ -41,9 +30,9 @@ if not defined PY_CMD (
 
 where wt >nul 2>&1
 if %ERRORLEVEL%==0 (
-  start "" wt.exe -w 0 -d "%HOME_DIR%" nt --hold --title "Jumperless" -- %PY_CMD% "%BOOTSTRAP%"
+  start "" wt.exe -w 0 -d "%USERPROFILE%" nt --hold --title "Jumperless" -- %PY_CMD% "%BOOTSTRAP%"
   exit /b 0
 )
 
-start "Jumperless" cmd /k cd /d "%HOME_DIR%" ^&^& %PY_CMD% "%BOOTSTRAP%"
+start "Jumperless" cmd /k cd /d "%USERPROFILE%" ^&^& %PY_CMD% "%BOOTSTRAP%"
 exit /b 0

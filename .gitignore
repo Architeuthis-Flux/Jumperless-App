@@ -18,6 +18,7 @@ env/
 ENV/
 jumperless-venv/
 .cache/
+test-jumperless-install/
 
 # PyPI distribution
 .pypirc
@@ -48,29 +49,32 @@ JumperlessFiles/appBackups/
 *.log
 firmware.uf2
 
-# PyInstaller
+# PyInstaller (generated specs + Windows version stamp)
 *.spec
-build/
-dist/
+!launcher/JumperlessLauncher.spec
+version_info.txt
+
+# Build outputs
+builds/
+local-builds/
+JumperlessDMG/
+Jumperless Python/
+*.app
+*.dmg
+*.AppImage
+
+# Native CLI helpers downloaded at runtime
+arduino-cli
+arduino-cli.exe
+
+# Generated from JumperlessWokwiBridge.py (Scripts/prepare_jumperless_pkg.py)
+jumperless_pkg/bridge.py
+jumperless_pkg/__pycache__/
 
 # Application data (user-specific)
 JumperlessFiles/slotAssignments.txt
 JumperlessFiles/savedProjects.txt
 slotAssignments.txt
 savedProjects.txt
-
 .jumperless_history
-
-
 Jumperless-App.code-workspace
-arduino-cli
-
-builds/
-# Generated from JumperlessWokwiBridge.py (Scripts/prepare_jumperless_pkg.py)
-jumperless_pkg/bridge.py
-jumperless_pkg/__pycache__/
-jumperlessDMG/
-
-
-=*
-arduino-cli*

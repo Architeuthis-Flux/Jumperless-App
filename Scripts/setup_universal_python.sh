@@ -6,8 +6,7 @@
 #
 # Usage:
 #   ./Scripts/setup_universal_python.sh
-#   source venv-packager/bin/activate
-#   python JumperlessAppPackagerOriginalAllPlatforms.py
+#   ./tools/build-macos-installer.sh --skip-setup
 
 set -euo pipefail
 
@@ -91,8 +90,8 @@ echo "Upgrading pip..."
 "$VENV_PY" -m pip install --upgrade pip wheel setuptools
 
 echo ""
-echo "Installing packager requirements..."
-"$VENV_PY" -m pip install --no-cache-dir -r "$ROOT/PackagingApps/packagerRequirements.txt"
+echo "Installing packager requirements (PyInstaller + app deps)..."
+"$VENV_PY" -m pip install --no-cache-dir "pyinstaller>=6.15" -r "$ROOT/requirements.txt"
 
 echo ""
 echo "Installing universal native dependencies (psutil, pyserial, ...)..."
@@ -104,13 +103,7 @@ echo "================================"
 echo "✅ Ready for universal macOS builds"
 echo "================================"
 echo ""
-echo "Activate the packager environment:"
-echo "  source venv-packager/bin/activate"
-echo ""
-echo "Build:"
-echo "  python JumperlessAppPackagerOriginalAllPlatforms.py"
-echo ""
-echo "Or without activating:"
-echo "  venv-packager/bin/python JumperlessAppPackagerOriginalAllPlatforms.py"
+echo "Build the macOS app + DMG:"
+echo "  ./tools/build-macos-installer.sh --skip-setup"
 echo ""
 echo "This venv uses: $("$VENV_PY" --version) ($(lipo -info "$VENV_PY" | sed 's/.*: //'))"

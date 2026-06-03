@@ -1,17 +1,35 @@
 # Jumperless-App
-An app to talk to your Jumperless V5
 
-## Make Targets
+An app to talk to your Jumperless V5 — connect to Wokwi, flash Arduino sketches,
+update firmware, and drive the board from a CLI.
 
-List of useful `make` targets:
-- `make app`: Runs the Jumperless App `JumperlessWokwiBridge.py` from source.
-    All python dependencies are installed in a virtual environment.
-    Also the default target, same as running bare `make`.
-- `make package`: Builds the distributable packages, same as running `python3 Packager/JumperlessAppPackager.py`.
-    All python dependencies are instaled in a dedicated virtual environment.
+## Install
 
-## Packager pip Versions
+The recommended way is from PyPI:
 
-Specific package versions are stipulated in `Packager/constraints.txt`.
-This keeps `Packager/packagerRequirements.txt` a little cleaner and allows for easier updating of versions.
-To update package versions, just run `make Packager/constraints.txt`
+```bash
+pip install jumperless        # or: uv tool install jumperless
+jumperless
+```
+
+Prefer an icon? Grab a native build (Windows `.exe`, macOS `.dmg`,
+Linux `.AppImage`) or the backup launcher from the
+[latest release](https://github.com/Architeuthis-Flux/JumperlessV5/releases/latest).
+
+## Run from source
+
+```bash
+python -m pip install -r requirements.txt
+python JumperlessWokwiBridge.py
+```
+
+## Building / releasing
+
+The whole packaging chain (PyPI, native installers, the uv backup launcher, CI,
+and local test builds) is documented in [docs/PACKAGING.md](docs/PACKAGING.md).
+
+Quick local build for testing:
+
+```bash
+python tools/build_local.py     # builds the current platform into local-builds/
+```

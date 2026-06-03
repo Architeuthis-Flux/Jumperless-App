@@ -8,202 +8,181 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# Opt in to Node24 for all JS actions (clears the Node20 deprecation warning).
 env:
   PYTHON_VERSION: "3.11"
   DISABLE_MACOS_NOTARIZATION: "false"
-  
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # Linux (AppImage + tar.gz) and Windows (.exe + zip)
+  # ---------------------------------------------------------------------------
   build:
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux builds
           - os: ubuntu-22.04
             platform: linux
             arch: x64
             artifact-name: "Jumperless-Linux-x64"
-            executable-name: "Jumperless"
-            icon-path: "assets/icons/icon.png"
-
-          # Windows builds
           - os: windows-latest
             platform: windows
             arch: x64
             artifact-name: "Jumperless-Windows-x64"
-            executable-name: "Jumperless"
-            icon-path: "assets/icons/icon.ico"
-            
-          - os: windows-latest
-            platform: windows
-            arch: x86
-            artifact-name: "Jumperless-Windows-x86"
-            executable-name: "Jumperless"
-            icon-path: "assets/icons/icon.ico"
 
     runs-on: ${{ matrix.os }}
-    
+
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Prepare jumperless_pkg for build
       run: python Scripts/prepare_jumperless_pkg.py
-      
+
     - name: Set up Python ${{ env.PYTHON_VERSION }}
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ env.PYTHON_VERSION }}
         architecture: ${{ matrix.arch }}
-        
+
     - name: Cache pip dependencies
       uses: actions/cache@v4
       with:
         path: |
           ~/.cache/pip
-          ~/.cache/uv
-        key: ${{ runner.os }}-${{ matrix.arch }}-pip-${{ hashFiles('**/requirements.txt', '**/packagerRequirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-${{ matrix.arch }}-pip-
-          
-    - name: Install uv (modern fast Python package manager)
-      run: |
-        python -m pip install --upgrade pip uv
-        
+          ~/AppData/Local/pip/Cache
+        key: ${{ runner.os }}-${{ matrix.arch }}-pip-${{ hashFiles('requirements.txt') }}
+        restore-keys: ${{ runner.os }}-${{ matrix.arch }}-pip-
+
+    # --- Linux ---------------------------------------------------------------
     - name: Install system dependencies (Linux)
       if: matrix.platform == 'linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libfuse2 desktop-file-utils
-        
-    - name: Install Python dependencies (Linux)
+        sudo apt-get install -y build-essential libfuse2 desktop-file-utils file wget
+
+    - name: Build executable (Linux, bullseye container for low glibc)
       if: matrix.platform == 'linux'
       run: |
-        uv pip install --system -r PackagingApps/packagerRequirements.txt
-        uv pip install --system -r requirements.txt
-        
-    - name: Install Python dependencies (Windows x64)
-      if: matrix.platform == 'windows' && matrix.arch == 'x64'
-      run: |
-        # Use regular pip for Windows - install all dependencies including GUI packages
-        python -m pip install -r PackagingApps/packagerRequirements.txt
-        python -m pip install -r requirements.txt
-        
-    - name: Install Python dependencies (Windows x86)
-      if: matrix.platform == 'windows' && matrix.arch == 'x86'
-      run: |
-        # Windows x86: Skip PySide6 and websockets (not available for 32-bit on Python 3.11+)
-        # Install PyInstaller and core dependencies first
-        python -m pip install pyinstaller pyinstaller-hooks-contrib
-        
-        # Install other non-GUI requirements from packagerRequirements.txt
-        python -m pip install altgraph beautifulsoup4 certifi charset-normalizer colorama idna packaging psutil pyduinocli pyserial requests setuptools six soupsieve termcolor typing_extensions urllib3 backports-datetime-fromisoformat pywin32
-        
-        # Install requirements.txt (basic dependencies)
-        python -m pip install -r requirements.txt
-        
-    - name: Verify PyInstaller installation
-      run: |
-        python -m PyInstaller --version
-        
-    - name: Create version info file (Windows)
-      if: matrix.platform == 'windows'
-      run: |
-        python -c "
-        import sys
-        sys.path.append('Scripts')
-        from create_version_info import create_version_info
-        create_version_info()
-        "
-        
-    - name: Build with PyInstaller (Linux, Debian bullseye container for lower glibc)
-      if: matrix.platform == 'linux'
-      run: |
-        echo "Building inside python:3.11-bullseye container (glibc ~2.31)"
         docker run --rm -v "$PWD":/work -w /work python:3.11-bullseye bash -lc '
           set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install pyinstaller
-          # Install project dependencies needed for build/runtime
-          if [ -f PackagingApps/packagerRequirements.txt ]; then python -m pip install -r PackagingApps/packagerRequirements.txt; fi
-          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
-          # Build
+          python -m pip install --upgrade pip pyinstaller
+          [ -f requirements.txt ] && python -m pip install -r requirements.txt
           python -m PyInstaller --clean --onefile --console \
-            --name "Jumperless" \
-            --distpath dist/linux \
-            --workpath build/linux \
-            --icon "assets/icons/icon.png" \
+            --name Jumperless \
+            --distpath dist/linux --workpath build/linux \
+            --add-data "VERSION:." \
+            --exclude-module brotli --exclude-module brotlicffi \
+            --icon assets/icons/icon.png \
             JumperlessWokwiBridge.py
         '
-        # Ensure host runner owns build artifacts created by container
-        sudo chown -R $(id -u):$(id -g) dist build || true
-          
-    - name: Build with PyInstaller (Windows)
-      if: matrix.platform == 'windows'
-      run: |
-        # Get absolute paths to avoid PyInstaller path issues
-        $CurrentDir = Get-Location
-        Write-Host "Current working directory: $CurrentDir"
-        Write-Host "Contents of current directory:"
-        Get-ChildItem
-        
-        # Use PyInstaller with direct command line arguments for consistent builds
-        Write-Host "Building with PyInstaller"
-        & python -m PyInstaller --clean --onefile --console --name "Jumperless" --distpath dist/windows --workpath build/windows --icon "assets/icons/icon.ico" JumperlessWokwiBridge.py
-      shell: pwsh
-          
-    - name: Create platform-specific package (Linux)
+        sudo chown -R "$(id -u):$(id -g)" dist build || true
+
+    - name: Package tar.gz fallback (Linux)
+      if: matrix.platform == 'linux'
+      env:
+        PREFER_TARGZ: "true"
+      run: python Scripts/package_app.py --platform linux --arch x64 --label "${{ matrix.artifact-name }}"
+
+    - name: Build AppImage (Linux)
       if: matrix.platform == 'linux'
       run: |
-        python Scripts/package_app.py --platform linux --arch ${{ matrix.arch }} --label "${{ matrix.artifact-name }}"
-      env:
-        PREFER_TARGZ: "true"  # Signal to prefer tar.gz over zip for Linux
-        
-    - name: Create platform-specific package (Windows)
+        set -euo pipefail
+        wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+        chmod +x appimagetool-x86_64.AppImage
+        rm -rf Jumperless.AppDir
+        mkdir -p Jumperless.AppDir/usr/bin
+        cp dist/linux/Jumperless Jumperless.AppDir/usr/bin/Jumperless
+        chmod +x Jumperless.AppDir/usr/bin/Jumperless
+        cp assets/icons/icon.png Jumperless.AppDir/jumperless.png
+        cat > Jumperless.AppDir/jumperless.desktop <<'EOF'
+        [Desktop Entry]
+        Type=Application
+        Name=Jumperless
+        Exec=Jumperless
+        Icon=jumperless
+        Categories=Development;Electronics;
+        EOF
+        cat > Jumperless.AppDir/AppRun <<'EOF'
+        #!/bin/bash
+        HERE="$(dirname "$(readlink -f "$0")")"
+        exec "$HERE/usr/bin/Jumperless" "$@"
+        EOF
+        chmod +x Jumperless.AppDir/AppRun
+        ./appimagetool-x86_64.AppImage --appimage-extract-and-run \
+          Jumperless.AppDir builds/Jumperless-Linux-x86_64.AppImage
+
+    # --- Windows -------------------------------------------------------------
+    - name: Install Python dependencies (Windows)
       if: matrix.platform == 'windows'
       run: |
-        python Scripts/package_app.py --platform windows --arch ${{ matrix.arch }} --label "${{ matrix.artifact-name }}"
-        
+        python -m pip install --upgrade pip pyinstaller
+        python -m pip install -r requirements.txt
+
+    - name: Create version info file (Windows)
+      if: matrix.platform == 'windows'
+      run: python Scripts/create_version_info.py
+
+    - name: Build executable (Windows)
+      if: matrix.platform == 'windows'
+      run: >
+        python -m PyInstaller --clean --onefile --console
+        --name Jumperless
+        --distpath dist/windows --workpath build/windows
+        --add-data "VERSION;."
+        --exclude-module brotli --exclude-module brotlicffi
+        --version-file version_info.txt
+        --icon assets/icons/icon.ico
+        JumperlessWokwiBridge.py
+      shell: pwsh
+
+    - name: Package zip (Windows)
+      if: matrix.platform == 'windows'
+      run: python Scripts/package_app.py --platform windows --arch x64 --label "${{ matrix.artifact-name }}"
+
+    # --- Common --------------------------------------------------------------
     - name: Run basic smoke test
-      if: matrix.platform != 'windows'
-      run: |
-        python Scripts/smoke_test.py --platform ${{ matrix.platform }}
-        
+      if: matrix.platform == 'linux'
+      run: python Scripts/smoke_test.py --platform ${{ matrix.platform }}
+
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.artifact-name }}
-        # Only the packaged archives/installer — NOT the raw unpacked .app tree,
-        # which previously got uploaded as hundreds of loose release assets.
         path: |
           builds/Jumperless-*.zip
           builds/Jumperless-*.tar.gz
-          builds/Jumperless-*.dmg
+          builds/Jumperless-*.AppImage
         if-no-files-found: error
         retention-days: 90
-        compression-level: 6
-        
-    - name: Upload to release (if tag)
+
+    - name: Upload to release (if main or tag)
       if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v2
       with:
         files: |
           builds/Jumperless-*.zip
           builds/Jumperless-*.tar.gz
-          builds/Jumperless-*.dmg
+          builds/Jumperless-*.AppImage
         tag_name: "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}"
         draft: false
         prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Universal macOS app + polished installer DMG (same pipeline as tools/build-macos-installer.sh)
+  # ---------------------------------------------------------------------------
+  # macOS: universal .app -> sign -> notarize -> DMG -> sign+notarize DMG
+  # One temp keychain is created up front and kept alive for BOTH the app and
+  # the DMG signing, then deleted in a final always() cleanup step.
+  # ---------------------------------------------------------------------------
   build-macos:
     runs-on: macos-latest
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Prepare jumperless_pkg for build
       run: python3 Scripts/prepare_jumperless_pkg.py
@@ -212,100 +191,95 @@ jobs:
       uses: actions/cache@v4
       with:
         path: venv-packager
-        key: macos-packager-${{ hashFiles('VERSION', 'PackagingApps/packagerRequirements.txt', 'Scripts/setup_universal_python.sh', 'Scripts/install_universal_deps.sh') }}
-        restore-keys: |
-          macos-packager-
+        key: macos-packager-${{ hashFiles('VERSION', 'requirements.txt', 'Scripts/setup_universal_python.sh', 'Scripts/install_universal_deps.sh') }}
+        restore-keys: macos-packager-
 
     - name: Install create-dmg
       run: brew install create-dmg
 
-    - name: Build macOS installer
-      env:
-        SKIP_DMG_CODESIGN: ${{ secrets.MACOS_CERTIFICATE == '' && '1' || '0' }}
-      run: |
-        chmod +x tools/build-macos-installer.sh Scripts/*.sh
-        ./tools/build-macos-installer.sh --ci
-
-    - name: Code Sign macOS App
+    - name: Import signing certificate
+      id: signing
       env:
         MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
         MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
       run: |
         if [ -z "$MACOS_CERTIFICATE" ]; then
-          echo "No signing certificate provided, skipping code signing"
+          echo "No signing certificate configured — building unsigned."
+          echo "signed=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-
-        security create-keychain -p temp_keychain_password temp_keychain
-        security default-keychain -s temp_keychain
-        security unlock-keychain -p temp_keychain_password temp_keychain
-
+        security create-keychain -p temp_pw build.keychain
+        security set-keychain-settings -lut 21600 build.keychain
+        security unlock-keychain -p temp_pw build.keychain
         echo "$MACOS_CERTIFICATE" | base64 --decode > certificate.p12
-        security import certificate.p12 -k temp_keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-        security set-key-partition-list -S apple-tool:,apple: -s -k temp_keychain_password temp_keychain
-
-        APP_PATH="dist/macos/Jumperless.app"
-        if [ -d "$APP_PATH" ]; then
-          codesign --force --sign "Developer ID Application" --deep --options runtime "$APP_PATH"
-          codesign --verify --verbose "$APP_PATH"
-        else
-          echo "App bundle not found at $APP_PATH"
+        security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+        rm -f certificate.p12
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k temp_pw build.keychain
+        security list-keychains -d user -s build.keychain login.keychain
+        security default-keychain -s build.keychain
+        IDENTITY=$(security find-identity -v -p codesigning build.keychain | awk -F'"' '/Developer ID Application/{print $2; exit}')
+        if [ -z "$IDENTITY" ]; then
+          echo "Certificate imported but no Developer ID Application identity found." >&2
           exit 1
         fi
+        echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+        echo "signed=true" >> "$GITHUB_OUTPUT"
+        echo "Signing identity: $IDENTITY"
 
-        rm certificate.p12
-        security delete-keychain temp_keychain
+    - name: Build macOS app + zip artifact
+      run: ./tools/build-macos-installer.sh --ci
 
-    - name: Notarize macOS App
+    - name: Sign app
+      if: steps.signing.outputs.signed == 'true'
+      run: |
+        codesign --force --deep --options runtime \
+          --sign "${{ steps.signing.outputs.identity }}" dist/macos/Jumperless.app
+        codesign --verify --verbose dist/macos/Jumperless.app
+
+    - name: Notarize app
+      if: steps.signing.outputs.signed == 'true' && env.DISABLE_MACOS_NOTARIZATION != 'true'
       env:
-        MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
         APPLE_ID: ${{ secrets.APPLE_ID }}
         APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
         APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        DISABLE_MACOS_NOTARIZATION: ${{ env.DISABLE_MACOS_NOTARIZATION }}
       run: |
-        if [ "$DISABLE_MACOS_NOTARIZATION" = "true" ]; then
-          echo "Notarization disabled"
+        if [ -z "$APPLE_ID" ] || [ -z "$APPLE_ID_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+          echo "Apple notarization credentials not set — skipping app notarization."
           exit 0
         fi
-        if [ -z "$MACOS_CERTIFICATE" ] || [ -z "$APPLE_ID" ]; then
-          echo "Skipping notarization (certificate or Apple ID not configured)"
-          exit 0
-        fi
-        if [ -z "$APPLE_ID_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
-          echo "ERROR: APPLE_ID_PASSWORD and APPLE_TEAM_ID are required for notarization"
-          exit 1
-        fi
-        if [ ${#APPLE_TEAM_ID} -ne 10 ]; then
-          echo "ERROR: APPLE_TEAM_ID should be exactly 10 characters"
-          exit 1
-        fi
-        if [[ ! "$APPLE_ID" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
-          echo "ERROR: APPLE_ID must be an email address"
-          exit 1
-        fi
-        if [[ ! "$APPLE_ID_PASSWORD" =~ ^[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$ ]]; then
-          echo "ERROR: APPLE_ID_PASSWORD must be an app-specific password (xxxx-xxxx-xxxx-xxxx)"
-          exit 1
-        fi
+        ditto -c -k --keepParent dist/macos/Jumperless.app Jumperless-app.zip
+        xcrun notarytool submit Jumperless-app.zip \
+          --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+        xcrun stapler staple dist/macos/Jumperless.app
+        rm -f Jumperless-app.zip
 
-        APP_PATH="dist/macos/Jumperless.app"
-        ditto -c -k --keepParent "$APP_PATH" "Jumperless.zip"
-        xcrun notarytool submit "Jumperless.zip" \
-          --apple-id "$APPLE_ID" \
-          --password "$APPLE_ID_PASSWORD" \
-          --team-id "$APPLE_TEAM_ID" \
-          --wait
-        xcrun stapler staple "$APP_PATH"
-        rm "Jumperless.zip"
-
-    - name: Create installer DMG
+    - name: Build installer DMG
       env:
-        SKIP_DMG_CODESIGN: ${{ secrets.MACOS_CERTIFICATE == '' && '1' || '0' }}
+        SKIP_DMG_CODESIGN: ${{ steps.signing.outputs.signed == 'true' && '0' || '1' }}
+        JUMPERLESS_DMG_CODESIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
       run: ./tools/build-macos-installer.sh --ci --dmg-only
+
+    - name: Notarize DMG
+      if: steps.signing.outputs.signed == 'true' && env.DISABLE_MACOS_NOTARIZATION != 'true'
+      env:
+        APPLE_ID: ${{ secrets.APPLE_ID }}
+        APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      run: |
+        if [ -z "$APPLE_ID" ] || [ -z "$APPLE_ID_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+          echo "Apple notarization credentials not set — skipping DMG notarization."
+          exit 0
+        fi
+        xcrun notarytool submit builds/Jumperless-Installer.dmg \
+          --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+        xcrun stapler staple builds/Jumperless-Installer.dmg
 
     - name: Run basic smoke test
       run: venv-packager/bin/python Scripts/smoke_test.py --platform macos
+
+    - name: Clean up keychain
+      if: always()
+      run: security delete-keychain build.keychain || true
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
@@ -316,9 +290,8 @@ jobs:
           builds/Jumperless-*.dmg
         if-no-files-found: error
         retention-days: 90
-        compression-level: 6
 
-    - name: Upload to release (if tag)
+    - name: Upload to release (if main or tag)
       if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v2
       with:
@@ -331,108 +304,81 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Job to create a combined release with all platforms
-  release:
-    needs: [build, build-macos]
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
-    
+  # ---------------------------------------------------------------------------
+  # uv backup launcher bundles (icon + self-update via uv tool upgrade)
+  # ---------------------------------------------------------------------------
+  build-launcher:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS
+            dirs: "macOS linux"
+          - os: windows-latest
+            label: Windows
+            dirs: "windows"
+    runs-on: ${{ matrix.os }}
+
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/checkout@v5
+
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v6
       with:
-        path: artifacts/
-        
-    - name: Create combined release package
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install PyInstaller (Windows .exe)
+      if: matrix.os == 'windows-latest'
+      run: python -m pip install --upgrade pip "pyinstaller>=6.15"
+
+    - name: Build launcher bundles
+      run: python tools/build_launcher.py --output-dir dist/launcher
+
+    - name: Zip launcher bundles
+      shell: bash
       run: |
-        mkdir -p combined-release
-        cp -r artifacts/* combined-release/
-        
-        # Create combined README
-        python Scripts/create_combined_readme.py
-        
-    - name: Upload combined release
+        set -euo pipefail
+        mkdir -p builds
+        for d in ${{ matrix.dirs }}; do
+          case "$d" in
+            macOS)   (cd dist/launcher/macOS && zip -r -q "$GITHUB_WORKSPACE/builds/Jumperless-Launcher-macOS.zip" Jumperless.app) ;;
+            linux)   (cd dist/launcher && zip -r -q "$GITHUB_WORKSPACE/builds/Jumperless-Launcher-Linux.zip" linux) ;;
+            windows) powershell -Command "Compress-Archive -Path dist/launcher/windows/* -DestinationPath builds/Jumperless-Launcher-Windows.zip -Force" ;;
+          esac
+        done
+        ls -lh builds/
+
+    - name: Upload launcher artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Jumperless-Launcher-${{ matrix.label }}
+        path: builds/Jumperless-Launcher-*.zip
+        if-no-files-found: error
+        retention-days: 90
+
+    - name: Upload to release (if main or tag)
+      if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v2
       with:
-        # Only the packaged archives/installers — not the unpacked .app internals.
-        files: |
-          combined-release/**/*.zip
-          combined-release/**/*.tar.gz
-          combined-release/**/*.dmg
-        name: "Jumperless ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}"
+        files: builds/Jumperless-Launcher-*.zip
         tag_name: "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}"
-        body: |
-          ## Jumperless ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('Development Build {0}', github.sha) }}
-          
-          Multi-platform release of the Jumperless Wokwi Bridge application.
-          
-          ### Downloads
-          - **Linux x64**: Jumperless-Linux-x64 (tar.gz + Python fallback)
-          - **macOS universal**: Jumperless-macOS-Apple-Silicon (installer DMG + zip fallback)
-          - **Windows x64**: Jumperless-Windows-x64 (EXE + Python fallback)
-          - **Windows x86**: Jumperless-Windows-x86 (EXE + Python fallback)
-          
-          ### macOS Users - Important Note
-          
-          **This release includes properly notarized macOS apps that should run without security warnings.**
-          
-          **To run the app:**
-          1. **Double-click** `Jumperless.app` - Opens Terminal automatically for CLI interaction
-          2. **Or run from Terminal** for direct console output:
-             ```bash
-             /path/to/Jumperless.app/Contents/MacOS/Jumperless
-             ```
-          
-          **If you still get a security warning:**
-          1. Right-click the app and select "Open" to bypass Gatekeeper
-          2. Or remove the quarantine attribute:
-             ```bash
-             xattr -d com.apple.quarantine Jumperless.app
-             ```
-          
-          ### Installation Methods
-          Each package includes multiple ways to run Jumperless:
-          1. **Native executable** - Double-click to run, no dependencies
-          2. **Python script** - Run from source with Python 3.11+
-          3. **Portable launcher** - Cross-platform launcher script
-          
-          ### Quick Start
-          1. Download the package for your platform
-          2. Extract/install the package
-          3. Run the native executable OR use the Python fallback
-          
-          See the README.md in each package for detailed instructions.
-          
-          ### What's New
-          - **Full macOS notarization support** - Apps are properly signed and notarized
-          - **No more macOS security warnings** - Apps run without quarantine issues
-          - Multi-platform CI/CD pipeline with Windows x86 support
-          - Improved packaging with modern tools
-          - Better error handling and logging
-          - Enhanced platform-specific optimizations
-          - Linux packages now use tar.gz format
-          - **macOS Terminal launcher** - Double-click opens Terminal automatically
-          - **Proper launcher script order** - Applied before code signing to maintain notarization
-          
         draft: false
         prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Mirror the packaged app outputs onto the public JumperlessV5 "latest" release,
-  # alongside the firmware.uf2 that the JumperlOS firmware CI publishes there. We
-  # only add/replace the app packages (*.dmg / *.zip / *.tar.gz) via --clobber and
-  # leave the release's tag, title, notes, and firmware.uf2 untouched.
+  # ---------------------------------------------------------------------------
+  # Mirror packaged app outputs onto the JumperlessV5 "latest" release, where
+  # the firmware.uf2 lives. Only adds/replaces app packages + launchers via
+  # --clobber; the release tag, title, notes, and firmware.uf2 are untouched.
   #
-  # Requires a JUMPERLESSV5_TOKEN secret on THIS repo: a PAT with write access to
-  # Architeuthis-Flux/JumperlessV5 (fine-grained: Contents read/write on that repo,
-  # or classic: `public_repo`). When the secret is absent the upload step is
-  # skipped instead of failing.
+  # Requires a JUMPERLESSV5_TOKEN secret (PAT with Contents:write on
+  # Architeuthis-Flux/JumperlessV5). Skipped gracefully when absent.
+  # ---------------------------------------------------------------------------
   publish-to-jumperlessv5:
-    needs: [build, build-macos]
+    needs: [build, build-macos, build-launcher]
     runs-on: ubuntu-latest
     if: github.repository == 'Architeuthis-Flux/Jumperless-App' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
     env:
@@ -445,34 +391,28 @@ jobs:
         path: artifacts/
 
     - name: Upload app packages onto the JumperlessV5 latest release
-      # Skip gracefully when the cross-repo PAT secret isn't configured.
       if: ${{ env.JUMPERLESSV5_TOKEN != '' }}
       env:
         GH_TOKEN: ${{ env.JUMPERLESSV5_TOKEN }}
       run: |
         set -euo pipefail
         REPO="Architeuthis-Flux/JumperlessV5"
-
-        # Collect the packaged app outputs only (never the unpacked .app internals).
         mapfile -t FILES < <(find artifacts -type f \( \
           -name 'Jumperless-*.dmg' -o \
           -name 'Jumperless-*.zip' -o \
-          -name 'Jumperless-*.tar.gz' \) | sort)
+          -name 'Jumperless-*.tar.gz' -o \
+          -name 'Jumperless-*.AppImage' \) | sort)
         if [ "${#FILES[@]}" -eq 0 ]; then
-          echo "::error::No app packages (*.dmg/*.zip/*.tar.gz) found under artifacts/ to upload."
+          echo "::error::No app packages found under artifacts/ to upload."
           exit 1
         fi
-        echo "Found ${#FILES[@]} app package(s) to publish:"
+        echo "Found ${#FILES[@]} package(s) to publish:"
         printf '  %s\n' "${FILES[@]}"
-
         CUR_TAG="$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || true)"
         if [ -z "$CUR_TAG" ]; then
-          echo "::warning::No existing JumperlessV5 release found; skipping app upload."
+          echo "::warning::No existing JumperlessV5 release found; skipping upload."
           exit 0
         fi
         echo "Target JumperlessV5 latest release: $CUR_TAG"
-
-        # Add/replace just the app packages on the current latest release; the tag,
-        # title, notes, and firmware.uf2 asset are left exactly as they are.
         gh release upload "$CUR_TAG" "${FILES[@]}" --repo "$REPO" --clobber
         echo "Published app packages onto $REPO release $CUR_TAG."
