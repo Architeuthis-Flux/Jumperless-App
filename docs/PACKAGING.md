@@ -14,7 +14,8 @@ There are four outputs:
 | Backup launcher | tiny per-OS app that installs/updates `jumperless` via `uv` | CI `build-launcher` job / `tools/build_launcher.py` |
 
 CI publishes all native artifacts to a **Jumperless-App** GitHub release and
-mirrors them onto the **JumperlessV5** "latest" release (next to `firmware.uf2`).
+mirrors the single-file installers (`.dmg` / `.exe` / `.AppImage`) onto the
+**JumperlessV5** "latest" release (next to `firmware.uf2`).
 
 ---
 
@@ -22,7 +23,13 @@ mirrors them onto the **JumperlessV5** "latest" release (next to `firmware.uf2`)
 
 `VERSION` at the repo root is the single source of truth. setuptools reads it
 for the PyPI metadata; PyInstaller bundles it next to the binary; the installed
-package also reports it via `importlib.metadata`. Bump `VERSION`, commit, tag.
+package also reports it via `importlib.metadata`.
+
+CI also derives the GitHub release tag from it: the `version` job reads `VERSION`
+and every build publishes to a release tagged **`v<VERSION>`** (e.g. `v1.1.1.19`)
+on the Jumperless-App repo. A real tag push (`refs/tags/v*`) uses the pushed tag
+instead. Bump `VERSION` to cut a new release; pushes that keep the same `VERSION`
+update that version's release in place.
 
 ---
 
@@ -83,8 +90,11 @@ universal venv (`./Scripts/setup_universal_python.sh`), then later runs are fast
   "item could not be found in the keychain" DMG failure.
 - **build-launcher** (matrix): builds the uv launcher bundles (macOS host →
   `.app` + Linux bundle; Windows host → `.exe`).
-- **publish-to-jumperlessv5**: uploads the packaged artifacts onto the JumperlessV5
-  latest release with `--clobber` (tag/title/notes/`firmware.uf2` untouched).
+- **publish-to-jumperlessv5**: mirrors only the single-file installers — the macOS
+  `.dmg`, the Windows `.exe`, and the Linux `.AppImage` — onto the JumperlessV5
+  latest release with `--clobber` (no zip/tar.gz bundles, no launcher zips;
+  tag/title/notes/`firmware.uf2` untouched). The Jumperless-App release itself
+  still gets every artifact (zips, tar.gz, launchers included).
 
 Code signing and notarization are conditional: when the macOS secrets are absent
 (e.g. a fork), the macOS job builds an **unsigned** DMG and stays green.

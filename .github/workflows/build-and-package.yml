@@ -16,9 +16,34 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Resolve the release tag/version from VERSION (single source of truth).
+  # Tag pushes use the pushed tag; everything else uses v<VERSION>.
+  # ---------------------------------------------------------------------------
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+    - uses: actions/checkout@v5
+    - id: v
+      run: |
+        VER="$(tr -d '[:space:]' < VERSION)"
+        if [ -z "$VER" ]; then echo "::error::VERSION file is empty"; exit 1; fi
+        if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+          TAG="${GITHUB_REF_NAME}"
+        else
+          TAG="v${VER}"
+        fi
+        echo "version=$VER" >> "$GITHUB_OUTPUT"
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "Release version=$VER tag=$TAG"
+
+  # ---------------------------------------------------------------------------
   # Linux (AppImage + tar.gz) and Windows (.exe + zip)
   # ---------------------------------------------------------------------------
   build:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -142,6 +167,11 @@ jobs:
       if: matrix.platform == 'windows'
       run: python Scripts/package_app.py --platform windows --arch x64 --label "${{ matrix.artifact-name }}"
 
+    - name: Stage standalone .exe (Windows)
+      if: matrix.platform == 'windows'
+      shell: bash
+      run: cp dist/windows/Jumperless.exe "builds/${{ matrix.artifact-name }}.exe"
+
     # --- Common --------------------------------------------------------------
     - name: Run basic smoke test
       if: matrix.platform == 'linux'
@@ -155,6 +185,7 @@ jobs:
           builds/Jumperless-*.zip
           builds/Jumperless-*.tar.gz
           builds/Jumperless-*.AppImage
+          builds/Jumperless-*.exe
         if-no-files-found: error
         retention-days: 90
 
@@ -166,9 +197,11 @@ jobs:
           builds/Jumperless-*.zip
           builds/Jumperless-*.tar.gz
           builds/Jumperless-*.AppImage
-        tag_name: "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}"
+          builds/Jumperless-*.exe
+        tag_name: ${{ needs.version.outputs.tag }}
+        name: Jumperless ${{ needs.version.outputs.tag }}
         draft: false
-        prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        prerelease: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -178,6 +211,7 @@ jobs:
   # the DMG signing, then deleted in a final always() cleanup step.
   # ---------------------------------------------------------------------------
   build-macos:
+    needs: version
     runs-on: macos-latest
 
     steps:
@@ -298,9 +332,10 @@ jobs:
         files: |
           builds/Jumperless-*.zip
           builds/Jumperless-*.dmg
-        tag_name: "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}"
+        tag_name: ${{ needs.version.outputs.tag }}
+        name: Jumperless ${{ needs.version.outputs.tag }}
         draft: false
-        prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        prerelease: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -308,6 +343,7 @@ jobs:
   # uv backup launcher bundles (icon + self-update via uv tool upgrade)
   # ---------------------------------------------------------------------------
   build-launcher:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -363,22 +399,25 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         files: builds/Jumperless-Launcher-*.zip
-        tag_name: "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}"
+        tag_name: ${{ needs.version.outputs.tag }}
+        name: Jumperless ${{ needs.version.outputs.tag }}
         draft: false
-        prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        prerelease: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ---------------------------------------------------------------------------
-  # Mirror packaged app outputs onto the JumperlessV5 "latest" release, where
-  # the firmware.uf2 lives. Only adds/replaces app packages + launchers via
-  # --clobber; the release tag, title, notes, and firmware.uf2 are untouched.
+  # Mirror the polished single-file installers (macOS .dmg, Windows .exe,
+  # Linux .AppImage) onto the JumperlessV5 "latest" release, where firmware.uf2
+  # lives. No zip/tar.gz bundles and no launcher zips go to JumperlessV5.
+  # Uploads via --clobber; the release tag, title, notes, and firmware.uf2 are
+  # untouched.
   #
   # Requires a JUMPERLESSV5_TOKEN secret (PAT with Contents:write on
   # Architeuthis-Flux/JumperlessV5). Skipped gracefully when absent.
   # ---------------------------------------------------------------------------
   publish-to-jumperlessv5:
-    needs: [build, build-macos, build-launcher]
+    needs: [build, build-macos]
     runs-on: ubuntu-latest
     if: github.repository == 'Architeuthis-Flux/Jumperless-App' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
     env:
@@ -391,28 +430,35 @@ jobs:
         path: artifacts/
 
     - name: Upload app packages onto the JumperlessV5 latest release
-      if: ${{ env.JUMPERLESSV5_TOKEN != '' }}
       env:
         GH_TOKEN: ${{ env.JUMPERLESSV5_TOKEN }}
       run: |
         set -euo pipefail
         REPO="Architeuthis-Flux/JumperlessV5"
+
+        if [ -z "${GH_TOKEN:-}" ]; then
+          echo "::warning::JUMPERLESSV5_TOKEN secret is not set on this repo. Skipping the JumperlessV5 mirror. Add a PAT with Contents:write on $REPO as the JUMPERLESSV5_TOKEN secret to enable mirroring."
+          exit 0
+        fi
+
+        # Mirror only the polished single-file installers — DMG (macOS),
+        # .exe (Windows), AppImage (Linux). No zip/tar.gz bundles.
         mapfile -t FILES < <(find artifacts -type f \( \
           -name 'Jumperless-*.dmg' -o \
-          -name 'Jumperless-*.zip' -o \
-          -name 'Jumperless-*.tar.gz' -o \
+          -name 'Jumperless-*.exe' -o \
           -name 'Jumperless-*.AppImage' \) | sort)
         if [ "${#FILES[@]}" -eq 0 ]; then
-          echo "::error::No app packages found under artifacts/ to upload."
+          echo "::error::No installers (.dmg/.exe/.AppImage) found under artifacts/ to upload."
           exit 1
         fi
         echo "Found ${#FILES[@]} package(s) to publish:"
         printf '  %s\n' "${FILES[@]}"
+
         CUR_TAG="$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || true)"
         if [ -z "$CUR_TAG" ]; then
-          echo "::warning::No existing JumperlessV5 release found; skipping upload."
-          exit 0
+          echo "::error::Could not read the latest $REPO release. Check that JUMPERLESSV5_TOKEN has Contents:write (and read) on $REPO."
+          exit 1
         fi
         echo "Target JumperlessV5 latest release: $CUR_TAG"
         gh release upload "$CUR_TAG" "${FILES[@]}" --repo "$REPO" --clobber
-        echo "Published app packages onto $REPO release $CUR_TAG."
+        echo "Published ${#FILES[@]} package(s) onto $REPO release $CUR_TAG."
