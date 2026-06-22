@@ -9,4 +9,3 @@ pyduinocli==0.35.0
 pyserial==3.5
 requests==2.34.2
 pywin32>=306; platform_system == "Windows"
-pynput; platform_system == "Windows"

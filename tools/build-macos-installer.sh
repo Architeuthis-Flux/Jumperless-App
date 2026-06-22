@@ -57,7 +57,7 @@ else
   OUTPUT_DIR="$ROOT/local-builds/macos"
 fi
 mkdir -p "$OUTPUT_DIR"
-DMG_OUT="${JUMPERLESS_DMG_OUTPUT:-$OUTPUT_DIR/Jumperless-Installer.dmg}"
+DMG_OUT="${JUMPERLESS_DMG_OUTPUT:-$OUTPUT_DIR/Jumperless-macOS.dmg}"
 
 if [[ "$CI" == "1" ]]; then
   export JUMPERLESS_CI=1

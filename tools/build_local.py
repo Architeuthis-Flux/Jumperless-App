@@ -5,7 +5,7 @@ Build Jumperless native artifacts locally for testing.
 Mirrors the CI build steps but writes into a dedicated, git-ignored
 `local-builds/` folder (never the CI `builds/` dir), and skips signing.
 
-  macOS    -> local-builds/macos/Jumperless.app + Jumperless-Installer.dmg (unsigned)
+  macOS    -> local-builds/macos/Jumperless.app + Jumperless-macOS.dmg (unsigned)
   Windows  -> local-builds/windows/Jumperless.exe
   Linux    -> local-builds/linux/Jumperless (+ AppImage if appimagetool is found)
   launcher -> local-builds/launcher/<platform> bundles

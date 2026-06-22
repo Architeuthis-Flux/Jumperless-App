@@ -7,7 +7,7 @@
 #
 # Environment overrides:
 #   JUMPERLESS_DMG_STAGING            staging directory (default: JumperlessDMG)
-#   JUMPERLESS_DMG_OUTPUT             output .dmg path (default: builds/Jumperless-Installer.dmg)
+#   JUMPERLESS_DMG_OUTPUT             output .dmg path (default: builds/Jumperless-macOS.dmg)
 #   JUMPERLESS_DMG_CODESIGN_IDENTITY  passed to create-dmg --codesign (default: Developer ID Application: …)
 #   SKIP_DMG_CODESIGN=1               skip DMG codesign entirely
 
@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 STAGING="${JUMPERLESS_DMG_STAGING:-JumperlessDMG}"
-OUTPUT="${JUMPERLESS_DMG_OUTPUT:-builds/Jumperless-Installer.dmg}"
+OUTPUT="${JUMPERLESS_DMG_OUTPUT:-builds/Jumperless-macOS.dmg}"
 IDENTITY="${JUMPERLESS_DMG_CODESIGN_IDENTITY:-Developer ID Application: Kevin Cappuccio (LK2RWK9EUK)}"
 
 ICON="assets/icons/icon.icns"

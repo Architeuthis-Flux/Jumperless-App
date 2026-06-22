@@ -42,7 +42,6 @@ dependencies = [
     "requests>=2.32.3",
     "colorama>=0.4.6",  # Cross-platform color support
     "pywin32>=306; platform_system == 'Windows'",
-    "pynput; platform_system == 'Windows'",
 ]
 
 [project.optional-dependencies]

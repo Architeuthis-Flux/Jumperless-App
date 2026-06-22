@@ -304,9 +304,9 @@ jobs:
           echo "Apple notarization credentials not set — skipping DMG notarization."
           exit 0
         fi
-        xcrun notarytool submit builds/Jumperless-Installer.dmg \
+        xcrun notarytool submit builds/Jumperless-macOS.dmg \
           --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
-        xcrun stapler staple builds/Jumperless-Installer.dmg
+        xcrun stapler staple builds/Jumperless-macOS.dmg
 
     - name: Run basic smoke test
       run: venv-packager/bin/python Scripts/smoke_test.py --platform macos

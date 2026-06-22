@@ -407,8 +407,8 @@ def create_macos_dmg(macos_dir, arch):
     if python_src.exists():
         shutil.copytree(python_src, staging / "Jumperless Python")
 
-    # builds/Jumperless-Installer.dmg matches release globs (builds/Jumperless-*.dmg).
-    output = macos_dir.parent / "Jumperless-Installer.dmg"
+    # builds/Jumperless-macOS.dmg matches release globs (builds/Jumperless-*.dmg).
+    output = macos_dir.parent / "Jumperless-macOS.dmg"
     script = root / "Scripts" / "createDMG.sh"
     env = os.environ.copy()
     env["JUMPERLESS_DMG_STAGING"] = str(staging)

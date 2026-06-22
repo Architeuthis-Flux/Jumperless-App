@@ -64,7 +64,7 @@ Results:
 
 ```
 local-builds/
-  macos/    Jumperless.app + Jumperless-Installer.dmg   (unsigned)
+  macos/    Jumperless.app + Jumperless-macOS.dmg   (unsigned)
   windows/  Jumperless.exe
   linux/    Jumperless (+ Jumperless-x86_64.AppImage if appimagetool is installed)
   launcher/ macOS|linux|windows launcher bundles

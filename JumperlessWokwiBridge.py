@@ -125,13 +125,8 @@ except ImportError:
     
     COLORS_AVAILABLE = False
 
-# Enhanced keyboard input support
-if sys.platform == "win32":
-    try:
-        from pynput import keyboard as pynput_keyboard
-        PYINPUT_AVAILABLE = True
-    except ImportError:
-        PYINPUT_AVAILABLE = False
+# Windows interactive input uses the built-in msvcrt console reader (focus-aware,
+# supports paste) - no pynput / global keyboard hook needed.
 
 # Interactive mode will use termios on Unix-like systems
 import shutil
@@ -221,16 +216,47 @@ def get_arduino_cli_url():
     
     return None
 
+def _writable_data_dir():
+    """Return a user-writable directory for downloaded tools (arduino-cli).
+
+    Prefers the app's existing data dir (SCRIPT_DIR/JumperlessFiles); if that
+    isn't writable - e.g. a pipx/packaged launch whose install path or current
+    working directory is read-only/system-owned - falls back to a per-user dir,
+    then the temp dir. This is what fixes the "[Errno 13] Permission denied:
+    'arduino-cli.zip'" failure: the old code wrote into the current directory.
+    """
+    candidates = [
+        os.path.join(SCRIPT_DIR, "JumperlessFiles"),
+        os.path.join(os.path.expanduser("~"), ".jumperless"),
+    ]
+    for d in candidates:
+        try:
+            os.makedirs(d, exist_ok=True)
+            test_path = os.path.join(d, ".write_test")
+            with open(test_path, "w") as f:
+                f.write("")
+            os.remove(test_path)
+            return d
+        except Exception:
+            continue
+    import tempfile
+    return tempfile.gettempdir()
+
+
 def download_and_extract_arduino_cli():
-    """Download and extract Arduino CLI to the current directory"""
+    """Download and install Arduino CLI into a user-writable directory.
+
+    Returns the full path to the extracted executable, or None on failure.
+    """
     try:
         import zipfile
         import tarfile
+        import tempfile
         
         cli_url = get_arduino_cli_url()
         if not cli_url:
             safe_print("Unsupported platform for Arduino CLI auto-download", Fore.RED)
-            return False
+            return None
         
         # Get and display the version being downloaded
         version = get_latest_arduino_cli_version()
@@ -249,64 +275,70 @@ def download_and_extract_arduino_cli():
         
         safe_print("Downloading Arduino CLI...", Fore.CYAN)
         
-        # Determine file extension
-        if cli_url.endswith('.zip'):
-            filename = "arduino-cli.zip"
-        else:
-            filename = "arduino-cli.tar.gz"
+        exe_name = "arduino-cli.exe" if sys.platform == "win32" else "arduino-cli"
+        install_dir = _writable_data_dir()
+        exe_path = os.path.join(install_dir, exe_name)
+        
+        # Download the archive into the TEMP dir (always writable), never the
+        # current directory - on a packaged/pipx launch the CWD can be a
+        # read-only/system folder, which is what caused the permission error.
+        archive_name = "arduino-cli.zip" if cli_url.endswith('.zip') else "arduino-cli.tar.gz"
+        archive_path = os.path.join(tempfile.gettempdir(), archive_name)
         
         # Download the file
         try:
-            urlretrieve(cli_url, filename)
+            urlretrieve(cli_url, archive_path)
             safe_print("Arduino CLI downloaded successfully", Fore.GREEN)
         except Exception as e:
             safe_print(f"Failed to download Arduino CLI: {e}", Fore.RED)
-            return False
+            return None
         
-        # Extract the file
+        # Extract the executable into the writable install dir
         try:
-            if filename.endswith('.zip'):
-                with zipfile.ZipFile(filename, 'r') as zip_ref:
-                    # Extract arduino-cli executable
+            if archive_path.endswith('.zip'):
+                with zipfile.ZipFile(archive_path, 'r') as zip_ref:
                     for file_info in zip_ref.filelist:
                         if file_info.filename.endswith('arduino-cli.exe') or file_info.filename.endswith('arduino-cli'):
-                            # Extract to current directory with proper name
-                            with zip_ref.open(file_info) as source:
-                                exe_name = "arduino-cli.exe" if sys.platform == "win32" else "arduino-cli"
-                                with open(exe_name, 'wb') as target:
-                                    target.write(source.read())
-                                # Make executable on Unix-like systems
-                                if sys.platform != "win32":
-                                    os.chmod(exe_name, 0o755)
-                                break
+                            with zip_ref.open(file_info) as source, open(exe_path, 'wb') as target:
+                                target.write(source.read())
+                            if sys.platform != "win32":
+                                os.chmod(exe_path, 0o755)
+                            break
             else:  # tar.gz
-                with tarfile.open(filename, 'r:gz') as tar_ref:
-                    # Extract arduino-cli executable
+                with tarfile.open(archive_path, 'r:gz') as tar_ref:
                     for member in tar_ref.getmembers():
                         if member.name.endswith('arduino-cli'):
-                            # Extract to current directory
-                            member.name = "arduino-cli"
-                            tar_ref.extract(member)
-                            # Make executable
-                            os.chmod("arduino-cli", 0o755)
+                            source = tar_ref.extractfile(member)
+                            if source is not None:
+                                with source, open(exe_path, 'wb') as target:
+                                    target.write(source.read())
+                                os.chmod(exe_path, 0o755)
                             break
             
             # Clean up downloaded archive
-            os.remove(filename)
-            safe_print("Arduino CLI extracted successfully", Fore.GREEN)
-            return True
+            try:
+                os.remove(archive_path)
+            except Exception:
+                pass
+            
+            if not os.path.isfile(exe_path):
+                safe_print("Arduino CLI archive did not contain the expected executable", Fore.RED)
+                return None
+            
+            safe_print(f"Arduino CLI installed to {exe_path}", Fore.GREEN)
+            return exe_path
             
         except Exception as e:
             safe_print(f"Failed to extract Arduino CLI: {e}", Fore.RED)
             try:
-                os.remove(filename)
-            except:
+                os.remove(archive_path)
+            except Exception:
                 pass
-            return False
+            return None
             
     except Exception as e:
         safe_print(f"Error during Arduino CLI installation: {e}", Fore.RED)
-        return False
+        return None
 
 def setup_arduino_cli():
     """Setup Arduino CLI with automatic installation if needed"""
@@ -319,9 +351,11 @@ def setup_arduino_cli():
         return False
     
     # Try different Arduino CLI locations in order of preference
+    exe_name = "arduino-cli.exe" if sys.platform == "win32" else "arduino-cli"
     cli_paths = [
-        resource_path("arduino-cli.exe" if sys.platform == "win32" else "arduino-cli"),
-        "./arduino-cli.exe" if sys.platform == "win32" else "./arduino-cli",
+        os.path.join(_writable_data_dir(), exe_name),  # our previously-downloaded copy
+        resource_path(exe_name),
+        "./" + exe_name,
         "arduino-cli"  # System PATH
     ]
     
@@ -341,11 +375,12 @@ def setup_arduino_cli():
     # If no Arduino CLI found, try to download and install it
     safe_print("Arduino CLI not found. Attempting automatic installation...", Fore.YELLOW)
     
-    if download_and_extract_arduino_cli():
-        # Try to initialize with the downloaded CLI
-        cli_name = "arduino-cli.exe" if sys.platform == "win32" else "./arduino-cli"
+    downloaded_cli = download_and_extract_arduino_cli()
+    if downloaded_cli:
+        # Initialize with the full path to the CLI we just installed (NOT a
+        # CWD-relative name - the working directory may not be where we wrote it).
         try:
-            arduino = pyduinocli.Arduino(cli_name)
+            arduino = pyduinocli.Arduino(downloaded_cli)
             arduino.version()
             safe_print("Arduino CLI automatically installed and ready!", Fore.GREEN)
             noArduinocli = False
@@ -444,6 +479,23 @@ original_settings = None
 # to request a state. No prefix/argument — the character itself is the directive.
 INTERACTIVE_ON = b'\x0e'       # SO - interactive ON
 INTERACTIVE_OFF = b'\x0f'      # SI - interactive OFF
+
+
+def _suspend_device_line_editor():
+    """Tell the DEVICE to stop line-editing (echo / syntax-highlight / history)
+    the bytes that follow, used to bracket bulk machine sends (Wokwi JSON,
+    netlists, slot queries). Caller MUST hold serial_lock and have verified the
+    port is open. The firmware adopts SI/SO silently (it never echoes them back),
+    so this never desyncs the app's own interactive_mode preference."""
+    ser.write(INTERACTIVE_OFF)
+
+
+def _restore_device_line_editor():
+    """Re-enable the device line editor iff the app prefers interactive mode.
+    Pairs with _suspend_device_line_editor() after a bulk machine send. Caller
+    MUST hold serial_lock and have verified the port is open."""
+    if interactive_mode:
+        ser.write(INTERACTIVE_ON)
 
 
 # Debug and configuration flags
@@ -548,6 +600,12 @@ debug_test_file = "jumperlesswokwibridgecopyfortesting.py"  # Local test file
 
 # Arduino sketch defaults
 defaultWokwiSketchText = 'void setup() {'
+
+# Pin the Arduino AVR core to the version that ships avrdude 6.3. Newer cores ship
+# avrdude 8.0, whose serial DTR auto-reset doesn't reliably trip the Jumperless
+# cap-emulation reset on Windows -> "not in sync". 1.8.6 matches the known-good
+# (macOS) setup. NOTE: this pins your GLOBAL arduino:avr core to this version.
+ARDUINO_AVR_CORE_VERSION = "1.8.6"
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -4198,11 +4256,14 @@ def upload_with_attempts_limit(sketch_dir, arduino_port, fqbn, build_dir, discov
         import subprocess
         import sys  # Import at the beginning to avoid "referenced before assignment" error
         import select
-        # Get the arduino-cli path
+        # Get the arduino-cli path (include the writable dir we auto-install into,
+        # so flashing finds the CLI that setup_arduino_cli downloaded there)
         cli_path = None
+        _exe_name = "arduino-cli.exe" if sys.platform == "win32" else "arduino-cli"
         cli_paths = [
-            resource_path("arduino-cli.exe" if sys.platform == "win32" else "arduino-cli"),
-            "./arduino-cli.exe" if sys.platform == "win32" else "./arduino-cli",
+            os.path.join(_writable_data_dir(), _exe_name),
+            resource_path(_exe_name),
+            "./" + _exe_name,
             "arduino-cli"  # System PATH
         ]
         
@@ -4235,40 +4296,20 @@ def upload_with_attempts_limit(sketch_dir, arduino_port, fqbn, build_dir, discov
         except Exception as verify_error:
             safe_print(f"Could not verify FQBN: {verify_error}", Fore.YELLOW)
         
-        # Force clear and verify Arduino port before upload
+        # Do NOT pre-open the Arduino port here.
+        #
+        # Opening the port (even at 115200, just to "verify accessibility") toggles
+        # DTR, which resets an ATmega Nano into its bootloader. The bootloader only
+        # listens for a second or two, and by the time the command is built and the
+        # avrdude subprocess actually opens the port (after the delay + process
+        # spawn) that window has already closed -> "stk500_recv(): programmer is
+        # not responding" / "not in sync". This is the same harmful open/close
+        # pattern already removed elsewhere (see the macOS re-enumeration note in
+        # flash_arduino_sketch). Let avrdude own the port: its own DTR reset lands
+        # inside the bootloader window.
         arduino_serial = None
         
-        # Step 1: Ensure Arduino port is accessible
-        safe_print("Verifying Arduino port accessibility...", Fore.YELLOW)
-        
-        # Step 2: Quick port accessibility check
-        for attempt in range(3):
-            try:
-                # Test if the port is available
-                arduino_serial = serial.Serial(arduino_port, 115200, timeout=0.1)
-                arduino_serial.close()  # Close it immediately after testing
-                arduino_serial = None
-                if debugWokwi:
-                    safe_print(f"Arduino port {arduino_port} verified available (attempt {attempt + 1})", Fore.CYAN)
-                break
-            except Exception as port_error:
-                if arduino_serial:
-                    try:
-                        arduino_serial.close()
-                    except:
-                        pass
-                    arduino_serial = None
-                
-                if attempt < 2:  # Not the last attempt
-                    if debugWokwi:
-                        safe_print(f"Arduino port busy, waiting... (attempt {attempt + 1})", Fore.YELLOW)
-                    time.sleep(0.5)  # Wait between attempts
-                else:
-                    # Final attempt - just warn but continue
-                    safe_print(f"Warning: Arduino port may be busy: {port_error}", Fore.YELLOW)
-                    safe_print("Attempting upload anyway...", Fore.CYAN)
-        
-        # Step 3: Brief stabilization delay
+        # Brief stabilization delay before launching avrdude.
         time.sleep(0.1)
         # Build the command using the configurable system
         # Note: Arduino CLI will automatically find compiled files in the sketch directory
@@ -4361,42 +4402,19 @@ def upload_with_attempts_limit(sketch_dir, arduino_port, fqbn, build_dir, discov
 
             if output == '' and process.poll() is not None:
                 break
-            if (notInSyncString in output):
-                # Arduino flash error detected - handle sync errors
-                safe_print(f"Arduino sync error detected (attempt {retries + 1}): {output.strip()}", Fore.YELLOW)
-                retries += 1
-                
-                # Try to send reset command to Arduino
-                # try:
-                #     if ser and ser.is_open:
-                #         ser.write(b"r")  # Send reset command
-                #         time.sleep(0.5)  # CRITICAL: Wait for reset to take effect
-                # except Exception as e:
-                #     safe_print(f"Error sending reset command: {e}", Fore.RED)
-                
-                if retries > 2:
-                    safe_print("Too many sync errors, terminating upload", Fore.RED)
-                    
-                    # Gracefully terminate the process
-                    try:
-                        if process.poll() is None:  # Only terminate if process is still running
-                            process.terminate()
-                            process.wait(timeout=2)  # Give it 2 seconds to terminate gracefully
-                    except subprocess.TimeoutExpired:
-                        safe_print("Process didn't terminate gracefully, force killing...", Fore.RED)
-                        try:
-                            process.kill()
-                            process.wait(timeout=1)  # Wait for kill to complete
-                        except subprocess.TimeoutExpired:
-                            safe_print("Process is unresponsive, continuing anyway...", Fore.RED)
-                    except Exception as term_error:
-                        safe_print(f"Error terminating process: {term_error}", Fore.RED)
-                    
-                    raise Exception(f"Upload failed after {retries} sync error attempts")
             elif output:
                 output_lines.append(output.strip())
-                # Print output in real-time with a prefix to distinguish it
+                # Print output in real-time
                 safe_print(f"{output.strip()}", Fore.CYAN)
+                # NOTE: do NOT kill avrdude on "not in sync" lines. avrdude retries
+                # the sync handshake up to 10 times within a single run, and those
+                # retries are exactly what catches the bootloader window after the
+                # Jumperless's DTR cap-emulation reset. The old code matched the
+                # avrdude 6.3 string ("stk500_recv(): programmer is not responding")
+                # and bailed after 3 - which both fails to match avrdude 8.0's
+                # wording AND throws away the later attempts that often succeed.
+                # Let avrdude finish; its exit code (handled below) is the verdict,
+                # with the 45s timeout above as the backstop.
             else:
                 # No output, sleep briefly to prevent busy waiting
                 time.sleep(0.1)
@@ -4585,13 +4603,27 @@ def bridge_menu():
             elif choice == 'status':
                 # safe_print(f"\nConnection: {'Connected' if serialconnected else 'Disconnected'}", 
                         #   Fore.GREEN if serialconnected else Fore.RED)
+                arduinoPortStatus = False
                 try:
-                    arduinoPortStatus = serial.Serial(arduinoPort, 115200, timeout=0.1).is_open
-                    arduinoPortStatus.close()
-                    arduinoPortStatus = True
-                    # arduinoPortStatus = serial.Serial(arduinoPort, 115200, timeout=0.1).is_open
-                    # print(arduinoPortStatus)
-                except:
+                    # Probe whether the Arduino port is free WITHOUT resetting the
+                    # Arduino: open with DTR/RTS de-asserted so the firmware doesn't
+                    # see a DTR edge (which would trigger flash-mode), and always
+                    # close it via the context manager so we release the port. The
+                    # old code called .close() on the bool returned by .is_open,
+                    # which threw -> status always reported "Busy" and the handle
+                    # (opened with DTR asserted) leaked.
+                    _ap = serial.Serial()
+                    _ap.port = arduinoPort
+                    _ap.baudrate = 115200
+                    _ap.timeout = 0.1
+                    _ap.dtr = False
+                    _ap.rts = False
+                    _ap.open()
+                    try:
+                        arduinoPortStatus = _ap.is_open
+                    finally:
+                        _ap.close()
+                except Exception:
                     arduinoPortStatus = False
 
                 safe_print(f"Jumperless Port: {portName if portName else 'None'} " + ("(Connected)" if serialconnected else "(Disconnected)"), Fore.GREEN if serialconnected else Fore.RED)
@@ -4639,7 +4671,7 @@ def bridge_menu():
 
 def get_arduino_cli_config():
     """Get arduino-cli command configuration from file, create default if not exists"""
-    config_file = "JumperlessFiles/arduino_cli_config.txt"
+    config_file = os.path.join(_writable_data_dir(), "arduino_cli_config.txt")
     
     # Default configuration
     default_config = [
@@ -4814,7 +4846,7 @@ def inline_format_to_config(command_string):
 
 def edit_arduino_cli_config():
     """Interactive editor for Arduino CLI configuration"""
-    config_file = "JumperlessFiles/arduino_cli_config.txt"
+    config_file = os.path.join(_writable_data_dir(), "arduino_cli_config.txt")
     
     # Ensure config file exists
     get_arduino_cli_config()  # This will create the file if it doesn't exist
@@ -5229,15 +5261,11 @@ def flash_arduino_sketch_threaded(sketch_content, libraries_content="", slot_num
                 # Brief wait for port to stabilize
                 time.sleep(0.2)
                 
-                # Single verification that Arduino port is released
-                try:
-                    test_serial = serial.Serial(arduinoPort, 115200, timeout=0.1)
-                    test_serial.close()
-                    if debugWokwi:
-                        safe_print(f"Arduino port {arduinoPort} released successfully", Fore.GREEN)
-                except Exception as port_test_error:
-                    if debugWokwi:
-                        safe_print(f"Note: Arduino port may still be busy: {port_test_error}", Fore.YELLOW)
+                # NOTE: do NOT open the Arduino port here to "verify it's released".
+                # Opening it toggles DTR and resets the Nano back into its bootloader;
+                # if another flash is starting that causes "Resource busy" and sync
+                # errors. The brief sleep above is enough — avrdude owns the port on
+                # the next flash.
                     
             except Exception as cleanup_error:
                 if debugWokwi:
@@ -5317,7 +5345,13 @@ def flash_arduino_sketch(sketch_content, libraries_content="", slot_number=None)
         safe_print("⚠️  Arduino not detected on Jumperless", Fore.YELLOW)
         
         # Check saved preference
-        if flashWithoutArduinoPresent is None:
+        if flashWithoutArduinoPresent is None and threading.current_thread() is not threading.main_thread():
+            # Auto-flash runs in a background thread; never block it on stdin (that
+            # races with the interactive reader and is the "have to press enter to
+            # flash" bug). Default to the prompt's own default (flash), but don't
+            # persist it so a deliberate choice can still be made from the foreground.
+            safe_print("⚠️  Arduino not detected — flashing anyway (auto). Use 'arduino' to disable flashing.", Fore.YELLOW)
+        elif flashWithoutArduinoPresent is None:
             # No preference set - ask once and save answer
             safe_print("Flash anyway? Y/n: ", Fore.CYAN, end='')
             sys.stdout.flush()  # Ensure prompt is shown
@@ -5432,9 +5466,12 @@ def flash_arduino_sketch(sketch_content, libraries_content="", slot_number=None)
         #     uart_was_connected = False
         #     uart_mode_changed = True
         #     time.sleep(1.0)
-        # Create sketch directory
-        sketch_dir = './WokwiSketch'
-        compile_dir = './WokwiSketch/compile'
+        # Create sketch directory in a user-writable location (NOT the current
+        # working directory, which on a packaged/pipx launch can be read-only ->
+        # "[WinError 5] Access is denied: './WokwiSketch'"). sketch_dir is passed
+        # by path to arduino-cli, so an absolute path works everywhere downstream.
+        sketch_dir = os.path.join(_writable_data_dir(), 'WokwiSketch')
+        compile_dir = os.path.join(sketch_dir, 'compile')
         
         if not os.path.exists(sketch_dir):
             os.makedirs(sketch_dir)
@@ -5464,11 +5501,14 @@ def flash_arduino_sketch(sketch_content, libraries_content="", slot_number=None)
                 except Exception as e:
                     safe_print(f"Warning: Could not install some libraries: {e}", Fore.YELLOW)
         
-        # Install Arduino AVR core if not already installed
+        # Install the PINNED Arduino AVR core (avrdude 6.3). No no_overwrite, so a
+        # newer already-installed core (avrdude 8.0) gets downgraded to match - the
+        # avrdude 8.0 DTR reset doesn't reliably sync through the Jumperless on
+        # Windows. arduino-cli is a fast no-op when the pinned version is present.
         try:
-            cores = ['arduino:avr']
-            arduino.core.install(cores, no_overwrite=True)
-            safe_print("Arduino AVR core ready", Fore.GREEN)
+            cores = [f'arduino:avr@{ARDUINO_AVR_CORE_VERSION}']
+            arduino.core.install(cores)
+            safe_print(f"Arduino AVR core ready (pinned {ARDUINO_AVR_CORE_VERSION} / avrdude 6.3)", Fore.GREEN)
             
             # List available boards to debug FQBN issues
             try:
@@ -5563,18 +5603,20 @@ def flash_arduino_sketch(sketch_content, libraries_content="", slot_number=None)
         safe_print("Uploading to Arduino...", Fore.CYAN)
         safe_print("Press any key to cancel upload...", Fore.YELLOW)
         
+        # Single upload attempt. Retrying doesn't help: if the first flash fails
+        # to sync, the later tries fail too (a missed reset window stays missed
+        # within a session), so retries just waste time. avrdude still does its own
+        # internal sync retries within this one run.
         try:
-            upload_result = upload_with_attempts_limit(
+            upload_with_attempts_limit(
                 sketch_dir,
                 arduinoPort,
                 "arduino:avr:nano",
                 None,  # No custom build dir - Arduino CLI will use default
                 "2s"
             )
-            
             safe_print("Arduino flashed successfully!", Fore.GREEN)
             return True
-            
         except Exception as e:
             safe_print(f"Upload failed: {e}", Fore.RED)
             safe_print("Tip: Try pressing the reset button on the Arduino and retry", Fore.CYAN)
@@ -6694,8 +6736,11 @@ def main():
                                                 # Flush any pending data
                                                 ser.reset_input_buffer()
                                                 
-                                                # Send query command
+                                                # Machine query: disable the device line editor so 'Q' isn't
+                                                # echoed/buffered, send it, then read the ACTIVE_SLOT reply.
+                                                _suspend_device_line_editor()
                                                 ser.write(b'Q')
+                                                ser.flush()
                                                 time.sleep(0.05)  # Brief wait for response
                                                 
                                                 # Read response
@@ -6709,6 +6754,10 @@ def main():
                                                                 safe_print(f"Queried active slot: {actual_active_slot}", Fore.CYAN)
                                                         except (ValueError, IndexError):
                                                             pass
+                                                
+                                                # Restore the device line editor to the app's preference.
+                                                _restore_device_line_editor()
+                                                ser.flush()
                                             except Exception as e:
                                                 if debugWokwi:
                                                     safe_print(f"Slot query error: {e}", Fore.YELLOW)
@@ -6732,7 +6781,15 @@ def main():
                                                             # Convert wokwi_data to compact JSON string
                                                             json_str = json.dumps(wokwi_data, separators=(',', ':'))
                                                             cmd = f"W {currentSlotUpdate} {json_str}".encode()
+                                                            # Bulk machine send: disable the device line editor for
+                                                            # the duration so the firmware doesn't echo / syntax-
+                                                            # highlight / history the JSON, then restore buffering to
+                                                            # the app's interactive_mode preference. The firmware
+                                                            # consumes the trailing SO after parsing the JSON.
+                                                            _suspend_device_line_editor()
                                                             ser.write(cmd)
+                                                            _restore_device_line_editor()
+                                                            ser.flush()
                                                             # safe_print(f"Updated slot {currentSlotUpdate} (onboard parser)", Fore.GREEN)
                                                             if debugWokwi:
                                                                 safe_print(f"Sent {len(json_str)} bytes of JSON", Fore.CYAN)
@@ -6765,19 +6822,22 @@ def main():
                                                 if debugWokwi:
                                                     safe_print(f"Skipping empty project for slot {currentSlotUpdate}", Fore.BLUE)
                                 
-                                        # Check for Arduino sketch changes and flash if needed
-                                        if not noArduinocli and (not disableArduinoFlashing or forceArduinoFlash):
-                                            try:
-                                                # Process Arduino sketch for this slot
-                                                process_wokwi_sketch_and_flash(current_wokwi_url, currentSlotUpdate)
-                                            except Exception as e:
-                                                if debugWokwi:
-                                                    safe_print(f"Arduino sketch processing error for slot {currentSlotUpdate}: {e}", Fore.YELLOW)
-                                        
                                         # Reset forceWokwiUpdate after successfully sending data
                                         if forceWokwiUpdate:
                                             forceWokwiUpdate = 0
                                 
+                                # Flash the Arduino sketch on EVERY poll, not only when the
+                                # diagram/wiring changed — otherwise editing just the sketch code
+                                # never triggers a flash (the diagram hash is unchanged).
+                                # process_wokwi_sketch_and_flash self-gates on the sketch content,
+                                # so an unchanged sketch is a cheap no-op (just the page fetch).
+                                if (updateInProgress == 0 and not noArduinocli and
+                                        (not disableArduinoFlashing or forceArduinoFlash)):
+                                    try:
+                                        process_wokwi_sketch_and_flash(current_wokwi_url, currentSlotUpdate)
+                                    except Exception as e:
+                                        if debugWokwi:
+                                            safe_print(f"Arduino sketch processing error for slot {currentSlotUpdate}: {e}", Fore.YELLOW)
                         except Exception as e:
                             safe_print(f"Error processing Wokwi data: {e}", Fore.RED)
                     
@@ -7097,173 +7157,112 @@ def handle_interactive_input_simple():
         disable_interactive_mode()
 
 def handle_interactive_input_windows():
-    """Windows-specific approach using pynput for complete key support"""
+    """Windows raw console input via msvcrt.
+
+    Reads from the console input buffer (kbhit/getwch) rather than a global
+    keyboard hook, so it only sees keystrokes when THIS window is focused and it
+    receives pasted text natively (paste lands in the console input buffer, which
+    getwch drains char-by-char). This replaces the old pynput approach, which
+    installed a system-wide low-level keyboard hook: it captured keys regardless
+    of focus and never saw pasted text (pynput only sees the Ctrl+V chord).
+    """
     global interactive_mode, serialconnected, ser, menuEntered
-    
-    # Check if pynput is available
+
     try:
-        import pynput.keyboard as pynput_keyboard
+        import msvcrt
     except ImportError:
-        safe_print("WARNING: pynput not available - falling back to simple input mode", Fore.YELLOW)
+        safe_print("WARNING: msvcrt not available - cannot use interactive mode", Fore.YELLOW)
         disable_interactive_mode()
         return
-    
-    try:
-        safe_print("Using pynput for enhanced Windows keyboard input (supports all Ctrl combinations)", Fore.GREEN)
-        
-        # Create a controller instance for modifier state checking
-        controller = pynput_keyboard.Controller()
-        
-        # Mutable state shared with the listener callback: the current typed line
-        # (for catching whole-line app commands like 'menu') and a request flag set
-        # when such a command is seen so we can act after the listener stops.
-        win_line_buffer = ['']
-        menu_requested = [False]
-        
-        def on_key_press(key):
-            if not interactive_mode:
-                return False  # Stop listener
-            
-            try:
-                # Handle special keys
-                if key == pynput_keyboard.Key.esc:
-                    # Send ESC sequence
-                    win_line_buffer[0] = ''
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1b')
-                elif key == pynput_keyboard.Key.enter:
-                    # Intercept whole-line app commands (e.g. 'menu') before forwarding.
-                    if win_line_buffer[0].strip().lower() in INTERACTIVE_APP_COMMANDS:
-                        menu_requested[0] = True
-                        return False  # Stop listener; menu opened after join()
-                    win_line_buffer[0] = ''
-                    # Send newline
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\n')
-                elif key == pynput_keyboard.Key.backspace:
-                    # Send backspace
-                    win_line_buffer[0] = win_line_buffer[0][:-1]
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x08')
-                elif key == pynput_keyboard.Key.tab:
-                    # Send tab
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\t')
-                # Arrow keys
-                elif key == pynput_keyboard.Key.up:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1b[A')
-                elif key == pynput_keyboard.Key.down:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1b[B')
-                elif key == pynput_keyboard.Key.right:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1b[C')
-                elif key == pynput_keyboard.Key.left:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1b[D')
-                # Navigation keys
-                elif key == pynput_keyboard.Key.home:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1b[H')
-                elif key == pynput_keyboard.Key.end:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1b[F')
-                elif key == pynput_keyboard.Key.page_up:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1b[5~')
-                elif key == pynput_keyboard.Key.page_down:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1b[6~')
-                elif key == pynput_keyboard.Key.insert:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1b[2~')
-                elif key == pynput_keyboard.Key.delete:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1b[3~')
-                # Function keys
-                elif key == pynput_keyboard.Key.f1:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1bOP')
-                elif key == pynput_keyboard.Key.f2:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1bOQ')
-                elif key == pynput_keyboard.Key.f3:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1bOR')
-                elif key == pynput_keyboard.Key.f4:
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(b'\x1bOS')
-                # Handle printable characters (including Ctrl combinations)
-                elif hasattr(key, 'char') and key.char:
-                    char_to_send = key.char
-                    
-                    # Handle Ctrl combinations properly
-                    if hasattr(key, 'vk'):
-                        # Check for Ctrl combinations by checking current modifier state
-                        try:
-                            with controller.modifiers as modifiers:
-                                if pynput_keyboard.Key.ctrl in modifiers or pynput_keyboard.Key.ctrl_l in modifiers or pynput_keyboard.Key.ctrl_r in modifiers:
-                                    # Convert to control character
-                                    if key.char and len(key.char) == 1:
-                                        char_code = ord(key.char.upper())
-                                        if 65 <= char_code <= 90:  # A-Z
-                                            ctrl_char = chr(char_code - 64)  # Ctrl+A = 1, Ctrl+B = 2, etc.
-                                            char_to_send = ctrl_char
-                        except:
-                            pass  # Use original character if modifier check fails
-                    
-                    # Track plain printable chars for whole-line command detection.
-                    if len(char_to_send) == 1 and char_to_send >= ' ':
-                        win_line_buffer[0] += char_to_send
-                    
-                    # Send the character
-                    with serial_lock:
-                        if serialconnected and ser and ser.is_open:
-                            ser.write(char_to_send.encode('utf-8', errors='ignore'))
-                            
-                elif debugWokwi:
-                    safe_print(f"Unhandled special key: {key}", Fore.YELLOW)
-                    
-            except Exception as e:
-                if debugWokwi:
-                    safe_print(f"Error handling key press: {e}", Fore.RED)
-        
-        # Start listener
-        with pynput_keyboard.Listener(on_press=on_key_press, suppress=False) as listener:
-            listener.join()
-        
-        # If the user typed an app command (e.g. 'menu'), open the app menu now
-        # that the listener has stopped.
-        if menu_requested[0]:
-            _enter_app_menu_from_interactive(len(win_line_buffer[0]))
-            return
-            
-    except Exception as e:
-        safe_print(f"pynput interactive mode error: {e}", Fore.RED)
-        disable_interactive_mode()
-    # NOTE: no finally-disable here. The listener also stops to open the app menu,
-    # which must not clear the persistent interactive_mode preference; the reader
-    # resumes after the menu closes. Real exits disable it explicitly above.
 
+    # Extended/function keys arrive as two reads: a '\x00' or '\xe0' lead byte,
+    # then a scan code. Map the useful ones to the same VT escape sequences the
+    # Unix path sends, which the firmware's line editor already understands.
+    EXTENDED_KEYS = {
+        'H': b'\x1b[A',   # Up
+        'P': b'\x1b[B',   # Down
+        'M': b'\x1b[C',   # Right
+        'K': b'\x1b[D',   # Left
+        'G': b'\x1b[H',   # Home
+        'O': b'\x1b[F',   # End
+        'R': b'\x1b[2~',  # Insert
+        'S': b'\x1b[3~',  # Delete
+        'I': b'\x1b[5~',  # Page Up
+        'Q': b'\x1b[6~',  # Page Down
+        ';': b'\x1bOP',   # F1
+        '<': b'\x1bOQ',   # F2
+        '=': b'\x1bOR',   # F3
+        '>': b'\x1bOS',   # F4
+    }
+
+    def _send(data):
+        with serial_lock:
+            if serialconnected and ser and ser.is_open:
+                try:
+                    ser.write(data)
+                except Exception as e:
+                    safe_print(f"Error sending character: {e}", Fore.RED)
+
+    # Track the current typed line so whole-line app commands (e.g. 'menu') are
+    # caught here instead of being forwarded to the device.
+    line_buffer = ''
+
+    try:
+        while interactive_mode:
+            # Poll so the loop can notice interactive_mode being turned off; only
+            # block in getwch once a key (or pasted char) is actually waiting.
+            if not msvcrt.kbhit():
+                time.sleep(0.005)
+                continue
+
+            ch = msvcrt.getwch()
+
+            # Extended / function key: lead byte then scan code.
+            if ch in ('\x00', '\xe0'):
+                code = msvcrt.getwch()
+                line_buffer = ''  # navigation ends the current logical line
+                seq = EXTENDED_KEYS.get(code)
+                if seq:
+                    _send(seq)
+                continue
+
+            if ch == '\x03':  # Ctrl+C (usually arrives as KeyboardInterrupt instead)
+                raise KeyboardInterrupt
+
+            if ch == '\x1b':  # ESC - forward raw, reset the tracked line
+                line_buffer = ''
+                _send(b'\x1b')
+                continue
+
+            if ch in ('\r', '\n'):
+                # Enter: intercept whole-line app commands before forwarding.
+                if line_buffer.strip().lower() in INTERACTIVE_APP_COMMANDS:
+                    _enter_app_menu_from_interactive(len(line_buffer))
+                    return
+                line_buffer = ''
+                _send(b'\n')  # firmware expects \n
+                continue
+
+            if ch in ('\x08', '\x7f'):  # Backspace / DEL
+                line_buffer = line_buffer[:-1]
+                _send(ch.encode('utf-8', errors='ignore'))
+                continue
+
+            # Printable char (tracked for command detection) or a Ctrl+letter
+            # control code (forwarded as-is, not tracked). Forward either way.
+            if ch >= ' ':
+                line_buffer += ch
+            _send(ch.encode('utf-8', errors='ignore'))
+
+    except KeyboardInterrupt:
+        disable_interactive_mode()
+        safe_print("\nInteractive mode interrupted", Fore.YELLOW)
+    except Exception as e:
+        safe_print(f"Interactive mode error: {e}", Fore.RED)
+        disable_interactive_mode()
+    # NOTE: no finally-disable. Typing 'menu' returns early WITHOUT clearing
+    # interactive_mode (the reader resumes after the menu closes); only real exits
+    # (Ctrl+C, errors) disable it explicitly above.
 
 
 def handle_interactive_input():

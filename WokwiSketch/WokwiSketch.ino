@@ -1,9 +1,9 @@
 void setup() {
 Serial.begin(115200);
-delay(100);
+delay(1200);
 }
 
 void loop() {
-  Serial.println("fuck");
-  delay(100);
+Serial.println(millis()+"fuck");
+delay(120);
 }
