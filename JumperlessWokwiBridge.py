@@ -2798,6 +2798,103 @@ def check_if_fw_is_old():
         noWokwiStuff = True
         return False
 
+# Seconds to wait for the RP2040/RP2350 UF2 bootloader drive to mount after we
+# put the Jumperless into BOOTSEL. In a VM the host has to re-attach the
+# re-enumerated USB device, which can take a few extra seconds.
+BOOTLOADER_WAIT_TIMEOUT = 30
+
+
+def _looks_like_uf2_bootloader(mountpoint, want_v5):
+    """True if `mountpoint` is an RP2040/RP2350 UF2 bootloader drive.
+
+    Checks the tell-tale UF2 files (INFO_UF2.TXT / INDEX.HTM) AND the volume
+    label, so it still works when Windows can't read the label. Not-ready or
+    nonexistent drives (empty card-reader slots etc.) are skipped silently -
+    they were the source of the "device is not ready" log spam.
+    """
+    # INFO_UF2.TXT is the definitive UF2-bootloader signature.
+    try:
+        info_path = os.path.join(mountpoint, "INFO_UF2.TXT")
+        if os.path.isfile(info_path):
+            try:
+                with open(info_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read().upper()
+                if want_v5 and "RP2350" in content:
+                    return True
+                if (not want_v5) and ("RP2040" in content or "RPI-RP2" in content):
+                    return True
+                # Any INFO_UF2.TXT means a UF2 bootloader is mounted - accept it.
+                return True
+            except Exception:
+                return True  # file exists; good enough
+    except Exception:
+        pass
+
+    # INDEX.HTM is also present on RPI bootloader drives.
+    try:
+        if os.path.isfile(os.path.join(mountpoint, "INDEX.HTM")):
+            return True
+    except Exception:
+        pass
+
+    # Volume label (Windows via win32api). Failures here = not-ready/unreadable.
+    if sys.platform == "win32" and WIN32_AVAILABLE:
+        try:
+            label = (win32api.GetVolumeInformation(mountpoint)[0] or "").upper()
+        except Exception:
+            return False  # not ready / nonexistent - skip quietly
+        if want_v5 and "RP2350" in label:
+            return True
+        if (not want_v5) and "RPI-RP2" in label:
+            return True
+        return False
+
+    # Unix/macOS: the label is usually part of the mount path.
+    mp = mountpoint.upper()
+    if want_v5 and "RP2350" in mp:
+        return True
+    if (not want_v5) and "RPI-RP2" in mp:
+        return True
+    return False
+
+
+def _find_bootloader_under(mountpoint, want_v5):
+    """Return the UF2 bootloader path at, or just under, `mountpoint`, else None.
+
+    Covers VM setups (Parallels/VMware) where the board isn't its own Windows
+    drive letter but shows up as a FOLDER under the shared 'Mac' drive - macOS
+    mounts removable media at /Volumes/RP2350, which Parallels surfaces as e.g.
+    Y:\\Volumes\\RP2350 (or Y:\\RP2350). We check the drive root, the well-known
+    names, and a shallow scan of the root and a 'Volumes' subfolder.
+    """
+    if _looks_like_uf2_bootloader(mountpoint, want_v5):
+        return mountpoint
+
+    bases = [mountpoint, os.path.join(mountpoint, "Volumes")]
+    for base in bases:
+        # Explicit, well-known bootloader volume names.
+        for name in ("RP2350", "RPI-RP2"):
+            cand = os.path.join(base, name)
+            try:
+                if _looks_like_uf2_bootloader(cand, want_v5):
+                    return cand
+            except Exception:
+                pass
+        # Shallow scan: any immediate subfolder that IS a UF2 bootloader (cheap;
+        # only the top level of the root and of any Volumes folder).
+        try:
+            for entry in os.listdir(base):
+                cand = os.path.join(base, entry)
+                try:
+                    if os.path.isdir(cand) and _looks_like_uf2_bootloader(cand, want_v5):
+                        return cand
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return None
+
+
 def update_jumperless_firmware(force=False):
     """Update Jumperless firmware"""
     global ser, menuEntered, serialconnected, updateInProgress, portName, latestFirmware
@@ -2847,7 +2944,11 @@ def update_jumperless_firmware(force=False):
                 firmware_url = latestFirmwareAddress
             if debugWokwi:
                 safe_print(f"Downloading firmware from: {firmware_url}", Fore.BLUE)
-            urlretrieve(firmware_url, "firmware.uf2")
+            # Download to a user-writable dir, not the CWD - a packaged/VM launch
+            # can have a read-only CWD (e.g. a Parallels Z:\ share), which gave
+            # "[Errno 13] Permission denied: 'firmware.uf2'".
+            firmware_path = os.path.join(_writable_data_dir(), "firmware.uf2")
+            urlretrieve(firmware_url, firmware_path)
             safe_print("Firmware downloaded successfully!", Fore.CYAN)
             
             # Attempt automatic firmware update
@@ -2891,147 +2992,46 @@ def update_jumperless_firmware(force=False):
                 printedDrives = 0
                 previous_drives = set()
                 while foundVolume == "none":
-                    if time.time() - timeStart > 20:
+                    if time.time() - timeStart > BOOTLOADER_WAIT_TIMEOUT:
                         safe_print("Timeout waiting for bootloader drive to appear", Fore.RED)
                         break
                     time.sleep(0.25)
-                    
+
                     try:
-                        partitions = psutil.disk_partitions()
+                        partitions = psutil.disk_partitions(all=True)
                         current_drives = set(p.mountpoint for p in partitions)
-                        
-                        # Show all drives on first iteration
+
+                        # Print the drive list once, then only newly-appeared drives.
                         if printedDrives < 1:
-                            safe_print(f"Available drives: ", Fore.YELLOW)
+                            safe_print("Available drives:", Fore.YELLOW)
                             for p in partitions:
                                 safe_print(f"  {p.mountpoint}", Fore.YELLOW)
                             previous_drives = current_drives.copy()
                             printedDrives += 1
                         else:
-                            # Show any new drives that appeared
                             new_drives = current_drives - previous_drives
                             if new_drives:
-                                # safe_print(f"New drive(s) detected:", Fore.GREEN)
                                 for drive in sorted(new_drives):
-                                    safe_print(f"  {drive}", Fore.GREEN)
+                                    safe_print(f"  New drive appeared: {drive}", Fore.GREEN)
                                 previous_drives = current_drives.copy()
-                        
+
+                        # A UF2 bootloader is identified by its files/label, not just
+                        # the volume name; not-ready drives are skipped silently.
                         for p in partitions:
-                            try:
-                                if sys.platform == "win32" and WIN32_AVAILABLE:
-                                    try:
-                                        volume_info = win32api.GetVolumeInformation(p.mountpoint)
-                                        volume_name = volume_info[0]
-                                        safe_print(f"Windows drive {p.mountpoint}: '{volume_name}'", Fore.YELLOW)
-                                        if jumperlessV5:
-                                            if "RP2350" in volume_name:
-                                                foundVolume = p.mountpoint
-                                                safe_print(f"Found Jumperless V5 at {foundVolume}", Fore.CYAN)
-                                                break
-                                        else:
-                                            if "RPI-RP2" in volume_name:
-                                                foundVolume = p.mountpoint
-                                                safe_print(f"Found Jumperless at {foundVolume}", Fore.CYAN)
-                                                break
-                                    except Exception as e:
-                                        safe_print(f"Error reading volume info for {p.mountpoint}: {e}", Fore.YELLOW)
-                                        continue
-                                elif sys.platform == "win32" and not WIN32_AVAILABLE:
-                                    # Fallback Windows method without win32api
-                                    try:
-                                        # Try to read a volume info file or check for characteristic files
-                                        mountpoint = p.mountpoint
-                                        safe_print(f"Checking Windows drive: {mountpoint}", Fore.YELLOW)
-                                        
-                                        # Method 1: Check if this looks like a RP2040/RP2350 drive by looking for INFO_UF2.TXT
-                                        info_file = os.path.join(mountpoint, "INFO_UF2.TXT")
-                                        if os.path.exists(info_file):
-                                            try:
-                                                with open(info_file, 'r', encoding='utf-8', errors='ignore') as f:
-                                                    content = f.read()
-                                                    safe_print(f"Found INFO_UF2.TXT content: {content[:100]}...", Fore.YELLOW)
-                                                    if jumperlessV5:
-                                                        if "RP2350" in content:
-                                                            foundVolume = mountpoint
-                                                            safe_print(f"Found Jumperless V5 at {foundVolume} via INFO_UF2.TXT", Fore.CYAN)
-                                                            break
-                                                    else:
-                                                        if "RP2040" in content:
-                                                            foundVolume = mountpoint
-                                                            safe_print(f"Found Jumperless at {foundVolume} via INFO_UF2.TXT", Fore.CYAN)
-                                                            break
-                                            except Exception as e:
-                                                safe_print(f"Error reading INFO_UF2.TXT: {e}", Fore.RED)
-                                        
-                                        # Method 2: Try using subprocess to get volume label
-                                        try:
-                                            # Handle both C:\ and C: formats
-                                            drive_letter = mountpoint.rstrip('\\').rstrip('/')
-                                            if len(drive_letter) == 2 and drive_letter.endswith(':'):
-                                                drive_letter += '\\'  # vol command needs C:\ format
-                                            
-                                            result = subprocess.run(['vol', drive_letter], 
-                                                                  capture_output=True, text=True, timeout=3)
-                                            if result.returncode == 0:
-                                                output = result.stdout.strip()
-                                                safe_print(f"Volume info for {drive_letter}: {output}", Fore.YELLOW)
-                                                if jumperlessV5:
-                                                    if "RP2350" in output.upper():
-                                                        foundVolume = mountpoint
-                                                        safe_print(f"Found Jumperless V5 at {foundVolume} via vol command", Fore.CYAN)
-                                                        break
-                                                else:
-                                                    if "RPI-RP2" in output.upper():
-                                                        foundVolume = mountpoint
-                                                        safe_print(f"Found Jumperless at {foundVolume} via vol command", Fore.CYAN)
-                                                        break
-                                            else:
-                                                safe_print(f"Vol command failed for {drive_letter}: {result.stderr.strip()}", Fore.YELLOW)
-                                        except Exception as e:
-                                            safe_print(f"Error checking volume with subprocess: {e}", Fore.YELLOW)
-                                        
-                                        # Method 3: Check for other characteristic RP2040/RP2350 files
-                                        try:
-                                            bootloader_files = ['INDEX.HTM', 'index.htm', 'boot_out.txt']
-                                            for boot_file in bootloader_files:
-                                                file_path = os.path.join(mountpoint, boot_file)
-                                                if os.path.exists(file_path):
-                                                    safe_print(f"Found {boot_file} - likely a Raspberry Pi bootloader drive", Fore.CYAN)
-                                                    foundVolume = mountpoint
-                                                    safe_print(f"Found potential Jumperless drive at {foundVolume} via {boot_file}", Fore.CYAN)
-                                                    break
-                                            if foundVolume != "none":
-                                                break
-                                        except Exception as e:
-                                            safe_print(f"Error checking for bootloader files: {e}", Fore.YELLOW)
-                                            
-                                    except Exception as e:
-                                        safe_print(f"Error in fallback Windows detection: {e}", Fore.RED)
-                                        continue
-                                else:
-                                # Unix-like systems
-                                # if jumperlessV5:
-                                    if p.mountpoint.endswith("RP2350") or "RP2350" in p.mountpoint:
-                                        foundVolume = p.mountpoint
-                                        safe_print(f"Found Jumperless V5 at {foundVolume}", Fore.RED)
-                                        break
-                                # else:
-                                    if p.mountpoint.endswith("RPI-RP2") or "RPI-RP2" in p.mountpoint:
-                                        foundVolume = p.mountpoint
-                                        safe_print(f"Found Jumperless at {foundVolume}", Fore.RED)
-                                        break
-                            except Exception:
-                                continue
+                            hit = _find_bootloader_under(p.mountpoint, jumperlessV5)
+                            if hit:
+                                foundVolume = hit
+                                safe_print(f"Found Jumperless bootloader drive at {foundVolume}", Fore.CYAN)
+                                break
                     except Exception as partition_error:
                         safe_print(f"Error scanning partitions: {partition_error}", Fore.YELLOW)
                         break
-                
                 if foundVolume != "none":
                     try:
                         fullPathRP = os.path.join(foundVolume, "firmware.uf2")
                         time.sleep(0.2)
                         safe_print("Copying firmware.uf2 to Jumperless...", Fore.YELLOW)
-                        shutil.copy("firmware.uf2", fullPathRP)
+                        shutil.copy(firmware_path, fullPathRP)
                         
                         time.sleep(0.75)
                         safe_print("Jumperless updated to latest firmware!", Fore.GREEN)
@@ -3073,9 +3073,16 @@ def update_jumperless_firmware(force=False):
                 safe_print("6. Drag the 'firmware.uf2' file to that drive", Fore.CYAN)
                 safe_print("7. The Jumperless will automatically reboot with new firmware", Fore.CYAN)
                 safe_print("8. Restart this application to reconnect", Fore.CYAN)
-                safe_print(f"\nThe firmware.uf2 file is in the current directory: {os.getcwd()}", Fore.GREEN)
+                safe_print(f"\nThe firmware.uf2 file is here: {firmware_path}", Fore.GREEN)
                 safe_print("\nIf you can't find the drive, try checking File Explorer for any new removable drives", Fore.BLUE)
                 safe_print("that appeared after holding BOOTSEL and reconnecting USB.", Fore.BLUE)
+
+                safe_print("\nRunning in a VM (Parallels / VMware / VirtualBox)?", Fore.MAGENTA)
+                safe_print("Entering BOOTSEL makes the Jumperless re-enumerate as a NEW USB", Fore.MAGENTA)
+                safe_print("mass-storage device, and the VM often won't auto-attach it - so", Fore.MAGENTA)
+                safe_print("Windows never sees the drive. Turn on 'connect new USB devices", Fore.MAGENTA)
+                safe_print("automatically' in your VM's USB settings, or manually attach the", Fore.MAGENTA)
+                safe_print("RP2350 / RPI-RP2 device to the VM when it appears, then retry.", Fore.MAGENTA)
                 
                 # input("\nPress Enter when you have completed the manual update...")
                 # safe_print("Please restart the application to reconnect to your Jumperless.", Fore.CYAN)
