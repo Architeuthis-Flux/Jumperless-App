@@ -15,50 +15,36 @@ It's not just about being too lazy to plug in some jumpers. With software contro
 But more likely, you'll be using it to get circuits from your brain into hardware with so little friction it feels like you're just thinking them into existence. So yeah, wizard shit.
 
 
+## Install
 
-## Installation
-
-### Recommended: Using pipx (Automatic Virtual Environment)
-
-The recommended way to install Jumperless is using [pipx](https://pipx.pypa.io/), which automatically creates an isolated virtual environment:
+Recommended (isolated tool install, no venv to activate):
 
 ```bash
-# Install pipx if you don't have it
-python3 -m pip install --user pipx
-python3 -m pipx ensurepath
-
-# Install Jumperless (creates isolated venv automatically)
-pipx install jumperless
-
-# Run the application
+uv tool install jumperless
+# or: pipx install jumperless
 jumperless
 ```
 
-### Alternative: Using pip
-
-You can also install with regular pip, but we recommend using a virtual environment:
+`pip` also works, but only updates the copy in *that* Python. If `which jumperless` points at `~/.local/bin/jumperless`, you have a pipx/uv-tool install and `pip install --upgrade jumperless` will not replace it.
 
 ```bash
-# Create and activate a virtual environment
 python3 -m venv jumperless-venv
-source jumperless-venv/bin/activate  # On Windows: jumperless-venv\Scripts\activate
-
-# Install Jumperless
+source jumperless-venv/bin/activate  # Windows: jumperless-venv\Scripts\activate
 pip install jumperless
-
-# Run the application
 jumperless
 ```
 
 ### Upgrading
 
-```bash
-# With pipx
-pipx upgrade jumperless
+Upgrade the same install that `which jumperless` shows:
 
-# With pip
-pip install --upgrade jumperless
+```bash
+uv tool upgrade jumperless          # uv tool install
+pipx upgrade jumperless             # pipx install
+pip install --upgrade jumperless    # pip / venv install
 ```
+
+If `pipx` itself errors with `No module named 'pipx'`, a leftover `~/.local/bin/pipx` is shadowing a working one (Homebrew: `/opt/homebrew/bin/pipx`). Remove the shim or call the working `pipx` by full path.
 
 ## Quick Start
 

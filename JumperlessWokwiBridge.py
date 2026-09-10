@@ -2849,13 +2849,35 @@ def _looks_like_uf2_bootloader(mountpoint, want_v5):
             return True
         return False
 
-    # Unix/macOS: the label is usually part of the mount path.
-    mp = mountpoint.upper()
-    if want_v5 and "RP2350" in mp:
-        return True
-    if (not want_v5) and "RPI-RP2" in mp:
-        return True
+    # Unix/macOS: UF2 bootloaders mount as real directories (e.g.
+    # /Volumes/RP2350). Never match on "RP2350" in the path string alone -
+    # join("/", "RP2350") is not a mount point and caused false positives.
+    if not os.path.isdir(mountpoint):
+        return False
+    try:
+        if os.path.isfile(os.path.join(mountpoint, "INFO_UF2.TXT")):
+            return True
+        if os.path.isfile(os.path.join(mountpoint, "INDEX.HTM")):
+            return True
+    except Exception:
+        pass
     return False
+
+
+def _scan_macos_bootloader_volumes(want_v5):
+    """Return /Volumes/<label> for a mounted RP UF2 bootloader on macOS."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        for entry in os.listdir("/Volumes"):
+            if entry.startswith("."):
+                continue
+            cand = os.path.join("/Volumes", entry)
+            if _looks_like_uf2_bootloader(cand, want_v5):
+                return cand
+    except Exception:
+        pass
+    return None
 
 
 def _find_bootloader_under(mountpoint, want_v5):
@@ -2867,15 +2889,22 @@ def _find_bootloader_under(mountpoint, want_v5):
     Y:\\Volumes\\RP2350 (or Y:\\RP2350). We check the drive root, the well-known
     names, and a shallow scan of the root and a 'Volumes' subfolder.
     """
-    if _looks_like_uf2_bootloader(mountpoint, want_v5):
+    if mountpoint != "/" and _looks_like_uf2_bootloader(mountpoint, want_v5):
         return mountpoint
 
-    bases = [mountpoint, os.path.join(mountpoint, "Volumes")]
+    bases = []
+    if mountpoint == "/":
+        bases.append("/Volumes")
+    else:
+        bases.append(mountpoint)
+        bases.append(os.path.join(mountpoint, "Volumes"))
     for base in bases:
         # Explicit, well-known bootloader volume names.
         for name in ("RP2350", "RPI-RP2"):
             cand = os.path.join(base, name)
             try:
+                if not os.path.isdir(cand):
+                    continue
                 if _looks_like_uf2_bootloader(cand, want_v5):
                     return cand
             except Exception:
@@ -3017,16 +3046,19 @@ def update_jumperless_firmware(force=False):
 
                         # A UF2 bootloader is identified by its files/label, not just
                         # the volume name; not-ready drives are skipped silently.
-                        for p in partitions:
-                            hit = _find_bootloader_under(p.mountpoint, jumperlessV5)
-                            if hit:
-                                foundVolume = hit
-                                safe_print(f"Found Jumperless bootloader drive at {foundVolume}", Fore.CYAN)
-                                break
+                        hit = _scan_macos_bootloader_volumes(jumperlessV5)
+                        if not hit:
+                            for p in partitions:
+                                hit = _find_bootloader_under(p.mountpoint, jumperlessV5)
+                                if hit:
+                                    break
+                        if hit:
+                            foundVolume = hit
+                            safe_print(f"Found Jumperless bootloader drive at {foundVolume}", Fore.CYAN)
                     except Exception as partition_error:
                         safe_print(f"Error scanning partitions: {partition_error}", Fore.YELLOW)
                         break
-                if foundVolume != "none":
+                if foundVolume != "none" and os.path.isdir(foundVolume):
                     try:
                         fullPathRP = os.path.join(foundVolume, "firmware.uf2")
                         time.sleep(0.2)
@@ -3237,23 +3269,51 @@ def is_running_from_executable():
     
     return False
 
-def is_pip_installed():
-    """Check if we're running from a pip/pipx installed package.
+def package_install_kind():
+    """How this copy was installed, or None if it is not a packaged install.
 
-    These installs live under site-packages / dist-packages or a pipx venv and
-    must be upgraded via pip/pipx — never by overwriting the script in place.
+    pip, pipx, and uv tool each own a different tree. Upgrading the wrong one
+    leaves the `jumperless` on PATH stale — which is why the hint must name
+    the tree we are actually running from, not list every package manager.
     """
     try:
         module_path = os.path.abspath(__file__)
     except NameError:
-        return False
-    markers = (
-        "site-packages",
-        "dist-packages",
-        os.path.join("pipx", "venvs"),
-        os.path.join("uv", "tools"),  # `uv tool install` layout
-    )
-    return any(marker in module_path for marker in markers)
+        return None
+    if os.path.join("pipx", "venvs") in module_path:
+        return "pipx"
+    if os.path.join("uv", "tools") in module_path:
+        return "uv"
+    if "site-packages" in module_path or "dist-packages" in module_path:
+        return "pip"
+    return None
+
+def is_pip_installed():
+    """Check if we're running from a pip/pipx/uv-tool installed package.
+
+    These installs live under site-packages / dist-packages or a pipx/uv venv
+    and must be upgraded via that package manager — never by overwriting the
+    script in place.
+    """
+    return package_install_kind() is not None
+
+def print_upgrade_instructions():
+    """Print the one upgrade command that will replace THIS running copy."""
+    kind = package_install_kind()
+    safe_print("\nUpgrade with:", Fore.CYAN)
+    if kind == "pipx":
+        safe_print(f"  pipx upgrade {pypi_package_name}", Fore.GREEN)
+        safe_print("  (`which pipx` must be a working pipx, not a leftover shim)", Fore.YELLOW)
+    elif kind == "uv":
+        safe_print(f"  uv tool upgrade {pypi_package_name}", Fore.GREEN)
+    elif kind == "pip":
+        safe_print(f"  pip install --upgrade {pypi_package_name}", Fore.GREEN)
+        safe_print("  (must be the same python/venv that launched this app)", Fore.YELLOW)
+    else:
+        safe_print(f"  uv tool upgrade {pypi_package_name}", Fore.GREEN)
+        safe_print(f"  (or: pipx upgrade {pypi_package_name})", Fore.GREEN)
+        safe_print(f"  (or: pip install --upgrade {pypi_package_name})", Fore.GREEN)
+    safe_print(f"This copy: {os.path.abspath(__file__)}", Fore.BLUE)
 
 def check_for_app_updates():
     """Check if there's a newer version of the app available"""
@@ -3583,10 +3643,7 @@ def update_app_if_needed():
         # this BEFORE is_running_from_executable(), since a console-script entry
         # point also looks like an "executable" (argv[0] has no .py suffix).
         if is_pip_installed():
-            safe_print("\nUpgrade with:", Fore.CYAN)
-            safe_print(f"  uv tool upgrade {pypi_package_name}", Fore.GREEN)
-            safe_print(f"  (or: pipx upgrade {pypi_package_name})", Fore.GREEN)
-            safe_print(f"  (or: pip install --upgrade {pypi_package_name})", Fore.GREEN)
+            print_upgrade_instructions()
             return
         
         # Frozen/packaged executables can't self-overwrite either.
