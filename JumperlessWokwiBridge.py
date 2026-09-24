@@ -501,6 +501,7 @@ def _restore_device_line_editor():
 # Debug and configuration flags
 debug = False
 jumperlessV5 = False
+jumperlessOgBackport = False  # OG (RP2040) running JumperlOS: four-part 1.x.y.z version
 noWokwiStuff = False
 disableArduinoFlashing = 1
 noArduinocli = True
@@ -587,6 +588,12 @@ firmware_repos_v5 = [
 # Resolved at version-check/download time to the winning repo's firmware.uf2 URL.
 latestFirmwareDownloadUrl = None
 latestFirmwareRepo = None
+
+# The OG (RP2040) running JumperlOS reports a four-part 1.x.y.z version and is
+# updated from the JumperlOS release, whose OG asset is named after its own
+# version (release 5.7.11.3 carries firmware_og_backport.1.7.11.3.uf2). The
+# original OG firmware (three-part, 1.3.23) stays on latestFirmwareAddress.
+firmware_repo_og_backport = "Architeuthis-Flux/JumperlOS"
 
 # App Update URLs
 app_update_repo = "Architeuthis-Flux/JumperlessV5"  # Repository for app updates
@@ -1620,9 +1627,28 @@ def extract_port_interface_number(port_info):
     
     return (interface_num, port_name)
 
+def classify_firmware(version_str):
+    """'v5', 'og_backport' or 'og_original' from a dotted version string.
+
+    V5 firmware is 5.x.y.z. JumperlOS on the OG remaps the major to 1 and keeps
+    the four-part cadence (1.7.11.3). The original OG firmware is three-part
+    (1.3.23). Anything unparseable counts as original: that path only offers
+    the Jumperless repo's firmware.uf2, which is all an unknown OG can take.
+    """
+    parts = [x for x in re.sub(r'[^\d\.]', '', str(version_str)).split('.') if x]
+    try:
+        major = int(parts[0])
+    except (IndexError, ValueError):
+        return 'og_original'
+    if major >= 5:
+        return 'v5'
+    if major == 1 and len(parts) >= 4:
+        return 'og_backport'
+    return 'og_original'
+
 def parse_firmware_version(response_str):
     """Extract and parse firmware version from response string"""
-    global jumperlessFirmwareString, jumperlessFirmwareNumber, jumperlessV5
+    global jumperlessFirmwareString, jumperlessFirmwareNumber, jumperlessV5, jumperlessOgBackport
     
     try:
         # Look for the firmware version line
@@ -1649,19 +1675,14 @@ def parse_firmware_version(response_str):
                         
                         if len(version_numbers) >= 3:
                             jumperlessFirmwareNumber = version_numbers[:3]
-                            try:
-                                if int(version_numbers[0]) >= 5:
-                                    jumperlessV5 = True
-                            except ValueError:
-                                pass
                         elif len(version_numbers) >= 1:
                             # Handle shorter version numbers
                             jumperlessFirmwareNumber = version_numbers + ['0'] * (3 - len(version_numbers))
-                            try:
-                                if int(version_numbers[0]) >= 5:
-                                    jumperlessV5 = True
-                            except ValueError:
-                                pass
+                        # Classify on the full version: the OG-on-JumperlOS
+                        # tell is its fourth component, truncated above.
+                        fw_class = classify_firmware(version_clean)
+                        jumperlessV5 = (fw_class == 'v5')
+                        jumperlessOgBackport = (fw_class == 'og_backport')
                     
                     if debugWokwi:
                         safe_print(f"Parsed version: {version_clean} -> {jumperlessFirmwareNumber}", Fore.CYAN)
@@ -2694,9 +2715,28 @@ def get_newest_firmware_source(repos):
     download_url = f"https://github.com/{best_repo}/releases/latest/download/firmware.uf2"
     return (best_tag, best_repo, download_url)
 
+def og_backport_version_from_tag(tag):
+    """5.7.11.3 -> 1.7.11.3: the OG build of a JumperlOS release swaps the major for 1."""
+    return '1.' + str(tag).lstrip('v').split('.', 1)[1]
+
+def get_og_backport_firmware_source():
+    """(og_version, repo, download_url) for the OG-on-JumperlOS image, or Nones.
+
+    The JumperlOS release is tagged with the V5 number and carries the OG image
+    as firmware_og_backport.<1.same-tail>.uf2 (release.yml derives that name the
+    same way), so one redirect lookup gives both the version and the URL.
+    """
+    tag = get_latest_release_tag(firmware_repo_og_backport)
+    if not tag or '.' not in tag:
+        return (None, None, None)
+    og_version = og_backport_version_from_tag(tag)
+    url = (f"https://github.com/{firmware_repo_og_backport}/releases/latest/download/"
+           f"firmware_og_backport.{og_version}.uf2")
+    return (og_version, firmware_repo_og_backport, url)
+
 def check_if_fw_is_old():
     """Check if firmware needs updating"""
-    global currentString, jumperlessFirmwareString, jumperlessV5, noWokwiStuff, latestFirmware
+    global currentString, jumperlessFirmwareString, jumperlessV5, jumperlessOgBackport, noWokwiStuff, latestFirmware
     global latestFirmwareDownloadUrl, latestFirmwareRepo
     
     if len(jumperlessFirmwareString) < 2:
@@ -2742,19 +2782,22 @@ def check_if_fw_is_old():
             if len(current_list[i]) < 2:
                 current_list[i] = '0' + current_list[i]
         
-        # Determine if this is V5
-        try:
-            if int(current_list[0]) >= 5:
-                jumperlessV5 = True
-        except ValueError:
-            safe_print(f"Invalid major version number: {current_list[0]}", Fore.YELLOW)
-            return False
+        # V5, OG on JumperlOS, or OG on the original firmware.
+        fw_class = classify_firmware(currentString)
+        jumperlessV5 = (fw_class == 'v5')
+        jumperlessOgBackport = (fw_class == 'og_backport')
         
         # Check latest version online. V5-class firmware lives in two repos now
         # (JumperlessV5 and JumperlOS); check both and use whichever published the
-        # newer release. Legacy (pre-V5) firmware stays on the original repo.
+        # newer release. An OG running JumperlOS follows the JumperlOS release's
+        # OG asset. Legacy (original OG) firmware stays on the original repo.
         if jumperlessV5:
             version, latestFirmwareRepo, latestFirmwareDownloadUrl = get_newest_firmware_source(firmware_repos_v5)
+            if version is None:
+                safe_print("Could not check the latest firmware version online", Fore.YELLOW)
+                return False
+        elif jumperlessOgBackport:
+            version, latestFirmwareRepo, latestFirmwareDownloadUrl = get_og_backport_firmware_source()
             if version is None:
                 safe_print("Could not check the latest firmware version online", Fore.YELLOW)
                 return False
@@ -2969,6 +3012,15 @@ def update_jumperless_firmware(force=False):
                     _tag, _repo, firmware_url = get_newest_firmware_source(firmware_repos_v5)
                 if not firmware_url:
                     firmware_url = latestFirmwareAddressV5
+            elif jumperlessOgBackport:
+                # Same shape as the V5 path. No static fallback: the only static
+                # OG URL is the original 1.3.x image, which would downgrade a
+                # board running JumperlOS.
+                firmware_url = latestFirmwareDownloadUrl
+                if not firmware_url:
+                    _tag, _repo, firmware_url = get_og_backport_firmware_source()
+                if not firmware_url:
+                    raise RuntimeError("could not resolve the OG JumperlOS firmware download (offline?)")
             else:
                 firmware_url = latestFirmwareAddress
             if debugWokwi:
@@ -4694,6 +4746,8 @@ def bridge_menu():
                 safe_print(f"Arduino Port: {arduinoPort if arduinoPort else 'None'} " + ("(Connectable)" if arduinoPortStatus else "(Busy)"), Fore.GREEN if arduinoPortStatus else Fore.RED)
                 safe_print(f"Firmware: {currentString}", Fore.CYAN) 
                 safe_print(f"Jumperless V5: {'Yes' if jumperlessV5 else 'No'}", Fore.MAGENTA if jumperlessV5 else Fore.BLUE)
+                if jumperlessOgBackport:
+                    safe_print("OG Jumperless running JumperlOS (updates follow the JumperlOS release)", Fore.MAGENTA)
                 safe_print(f"Arduino CLI: {'Available' if not noArduinocli else 'Not Available'}" + (" - version: " + get_installed_arduino_cli_version() if not noArduinocli else ""), Fore.CYAN if not noArduinocli else Fore.YELLOW)
                 safe_print(f"Arduino Flashing: {'Enabled' if not disableArduinoFlashing and not noArduinocli else 'Disabled'}", Fore.MAGENTA if not disableArduinoFlashing and not noArduinocli else Fore.BLUE)
                 # safe_print(f"Arduino CLI Version: {get_installed_arduino_cli_version()}", Fore.CYAN)
