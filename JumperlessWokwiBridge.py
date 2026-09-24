@@ -2772,16 +2772,6 @@ def check_if_fw_is_old():
             safe_print(f"Could not parse firmware version from: {jumperlessFirmwareString}", Fore.YELLOW)
             return False
         
-        current_list = currentString.split('.')
-        if len(current_list) < 3:
-            # Pad short version numbers with zeros
-            current_list = current_list + ['0'] * (3 - len(current_list))
-        
-        # Pad version numbers for comparison
-        for i in range(len(current_list)):
-            if len(current_list[i]) < 2:
-                current_list[i] = '0' + current_list[i]
-        
         # V5, OG on JumperlOS, or OG on the original firmware.
         fw_class = classify_firmware(currentString)
         jumperlessV5 = (fw_class == 'v5')
@@ -2807,25 +2797,12 @@ def check_if_fw_is_old():
             latestFirmwareRepo = "Architeuthis-Flux/Jumperless"
             latestFirmwareDownloadUrl = latestFirmwareAddress
         
-        latest_list = version.split('.')
-        if len(latest_list) < 3:
-            # Pad short version numbers
-            latest_list = latest_list + ['0'] * (3 - len(latest_list))
-        
-        # Pad latest version numbers for comparison
-        for i in range(len(latest_list)):
-            if len(latest_list[i]) < 2:
-                latest_list[i] = '0' + latest_list[i]
-        
-        try:
-            latest_int = int("".join(latest_list))
-            current_int = int("".join(current_list))
-        except ValueError as e:
-            safe_print(f"Version comparison failed: {e}", Fore.YELLOW)
-            return False
-        
         latestFirmware = version
-        if latest_int > current_int:
+        # firmware_version_compare() pads the shorter version with zeros, so a
+        # three-part tag (5.8.0 -> 1.8.0 for the OG) compares correctly against
+        # a four-part board version. The zero-padded digit join it replaces read
+        # 1.8.0 as 10800 < 1071102 (1.7.11.2) and never offered that update.
+        if version != currentString and firmware_version_compare(version, currentString):
             repo_note = f"  ({latestFirmwareRepo.split('/')[-1]})" if latestFirmwareRepo else ""
             safe_print(f"\nLatest firmware: {version}{repo_note}", Fore.MAGENTA)
             safe_print(f"Current version: {currentString}", Fore.RED)
