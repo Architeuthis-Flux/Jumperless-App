@@ -12,4 +12,7 @@ Quick reference:
 - Triggers: push to `main`, `v*` tags, PRs to `main`, and manual dispatch.
 - Required secrets: see the "Required GitHub secrets" table in
   [PACKAGING.md](PACKAGING.md).
-- PyPI is **not** published by CI — use `./tools/publish_pypi.sh` (manual).
+- PyPI: the `publish-pypi` job uploads on every `v*` tag when the
+  `PYPI_API_TOKEN` secret is set (pypi.org API token scoped to `jumperless`);
+  without it the job only builds and warns, and `./tools/publish_pypi.sh --prod`
+  is the manual fallback. The tag must equal `v<VERSION>`.

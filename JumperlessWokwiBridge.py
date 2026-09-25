@@ -446,6 +446,57 @@ def _set_serial_buffers(port_handle):
 wokwi_update_lock = threading.Lock()
 arduino_flash_lock = threading.Lock()  # Prevent concurrent Arduino uploads
 
+# ---------------------------------------------------------------------------
+# Port lease: how another program asks this app to get off the serial port.
+#
+# The OS gives the port to one process (macOS/Windows), so a script, an AI
+# agent or a flasher that wants the Jumperless while this app is running would
+# just see "Resource busy". Instead it creates ~/.jumperless_port_lease and the
+# app lets go within ~100 ms (check_presence polls at 10 Hz), then stays off
+# the port until the lease is gone and reconnects on its own.
+#
+#   echo "$$ my-tool" >> ~/.jumperless_port_lease   # one "<pid> <label>" per line
+#   ... use the port ...
+#   rm ~/.jumperless_port_lease
+#
+# A line's lease lives while its PID does, so a crashed requester can't strand
+# the app. A bare `touch` (no PID) is honoured for PORT_LEASE_TTL seconds.
+# ---------------------------------------------------------------------------
+PORT_LEASE_FILE = os.path.expanduser("~/.jumperless_port_lease")
+PORT_LEASE_TTL = 60  # seconds a pid-less lease lasts (touch again to extend)
+portYieldedTo = None  # who we gave the port to, while yielded
+
+def port_lease_holder():
+    """Label of whoever holds a live lease, or None. Deletes a stale lease file."""
+    try:
+        with open(PORT_LEASE_FILE, "r", encoding="utf-8", errors="replace") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+        mtime = os.path.getmtime(PORT_LEASE_FILE)
+    except OSError:
+        return None
+    live = []
+    for line in lines:
+        pid = line.split(None, 1)[0]
+        if pid.isdigit():
+            if int(pid) != os.getpid() and psutil.pid_exists(int(pid)):
+                live.append(line)
+        elif time.time() - mtime < PORT_LEASE_TTL:
+            live.append(line)
+    if not lines and time.time() - mtime < PORT_LEASE_TTL:
+        live.append("another program (touch lease)")
+    if live:
+        return ", ".join(live)
+    try:
+        os.remove(PORT_LEASE_FILE)  # holder died / touch expired
+    except OSError:
+        pass
+    return None
+
+def _is_port_busy_error(e):
+    """True if the OS refused the port because another process holds it."""
+    s = str(e).lower()
+    return 'busy' in s or 'errno 16' in s or 'access is denied' in s or 'permissionerror' in s
+
 # Global process tracking for cleanup
 active_processes = []
 active_threads = []
@@ -574,29 +625,25 @@ else:
 slotAssignmentsFile = os.path.join(SCRIPT_DIR, "JumperlessFiles", "slotAssignments.txt")
 savedProjectsFile = os.path.join(SCRIPT_DIR, "JumperlessFiles", "savedProjects.txt")
 
-# Firmware URLs
-latestFirmwareAddress = "https://github.com/Architeuthis-Flux/Jumperless/releases/latest/download/firmware.uf2"
-latestFirmwareAddressV5 = "https://github.com/Architeuthis-Flux/JumperlessV5/releases/latest/download/firmware.uf2"
-
-# V5-class firmware is now published to two repos (the original JumperlessV5 repo
-# and the newer JumperlOS repo). We check both and download whichever published
-# the newer release. Order doesn't matter; the newest version wins.
-firmware_repos_v5 = [
-    "Architeuthis-Flux/JumperlessV5",
-    "Architeuthis-Flux/JumperlOS",
-]
-# Resolved at version-check/download time to the winning repo's firmware.uf2 URL.
-latestFirmwareDownloadUrl = None
+# Firmware sources. One JumperlOS release carries both the V5 image
+# (firmware.uf2) and the OG backport image (firmware_og_backport.1.x.y.z.uf2:
+# same tail, major 5 -> 1). The original OG firmware (three-part 1.3.x) only
+# exists in the Jumperless repo.
+firmware_repo = "Architeuthis-Flux/JumperlOS"
+firmware_repo_og_original = "Architeuthis-Flux/Jumperless"
+# Which firmware line an OG board follows: None = whatever it is running now;
+# the 'ogfw' menu command sets 'og_backport' / 'og_original' to switch lines.
+ogFirmwareChoice = None
+# Filled in by resolve_latest_firmware().
+latestFirmware = None
 latestFirmwareRepo = None
+latestFirmwareDownloadUrl = None
 
-# The OG (RP2040) running JumperlOS reports a four-part 1.x.y.z version and is
-# updated from the JumperlOS release, whose OG asset is named after its own
-# version (release 5.7.11.3 carries firmware_og_backport.1.7.11.3.uf2). The
-# original OG firmware (three-part, 1.3.23) stays on latestFirmwareAddress.
-firmware_repo_og_backport = "Architeuthis-Flux/JumperlOS"
-
-# App Update URLs
-app_update_repo = "Architeuthis-Flux/JumperlessV5"  # Repository for app updates
+# App updates. PyPI is the version of record (pip / pipx / uv installs upgrade
+# from it); the raw-script path pulls the same tag from the app repo, and the
+# packaged binaries live on its releases.
+app_repo = "Architeuthis-Flux/Jumperless-App"
+app_releases_page = f"https://github.com/{app_repo}/releases/latest"
 app_script_name = "JumperlessWokwiBridge.py"
 app_requirements_name = "requirements.txt"
 pypi_package_name = "jumperless"  # PyPI project name (used for update checks)
@@ -2433,9 +2480,25 @@ def open_serial():
         
         last_open_error = None  # Track for OSError 22 "device not ready" retry prompt
         
-        # Attempt to open the selected port (with retry for Windows timing / OSError 22)
+        # Attempt to open the selected port (with retry for Windows timing / OSError 22).
+        # If someone else has the port - a lease (PORT_LEASE_FILE) or the OS saying
+        # busy - wait for them rather than burning attempts or "falling back" onto
+        # another CDC port of the same board (that would put this terminal on the
+        # MicroPython REPL and take it away from whoever wanted port 1).
         max_open_attempts = 8 if sys.platform == "win32" else 1
-        for attempt in range(max_open_attempts):
+        attempt = 0
+        waiting_on = None
+        while attempt < max_open_attempts:
+            holder = port_lease_holder()
+            if holder:
+                if holder != waiting_on:
+                    safe_print(f"{holder} has asked for the Jumperless port; waiting for it to finish (Ctrl+C to stop waiting)...", Fore.YELLOW)
+                    waiting_on = holder
+                try:
+                    time.sleep(0.25)
+                except KeyboardInterrupt:
+                    break
+                continue
             try:
                 if updateInProgress == 0:
                     with serial_lock:
@@ -2454,11 +2517,23 @@ def open_serial():
                             safe_print(f"Could not query firmware version: {e}", Fore.YELLOW)
                     
                     return ser
+                attempt += 1
             except Exception as e:
                 last_open_error = e
+                if _is_port_busy_error(e):
+                    if waiting_on != 'busy':
+                        safe_print(f"\n{portName} is in use by another program (JumperIDE, a serial monitor, a script...).", Fore.YELLOW)
+                        safe_print("Waiting for it to be released - close it there, or Ctrl+C to stop waiting.", Fore.YELLOW)
+                        waiting_on = 'busy'
+                    try:
+                        time.sleep(0.5)
+                    except KeyboardInterrupt:
+                        break
+                    continue
+                attempt += 1
                 delay = 2.0 if _is_oserror22(e) else 0.5
-                if attempt < max_open_attempts - 1:
-                    safe_print(f"Port open attempt {attempt + 1} failed: {e}, retrying in {delay:.1f}s...", Fore.YELLOW)
+                if attempt < max_open_attempts:
+                    safe_print(f"Port open attempt {attempt} failed: {e}, retrying in {delay:.1f}s...", Fore.YELLOW)
                     time.sleep(delay)
                 else:
                     safe_print(f"Failed to open serial port {portName}: {e}", Fore.RED)
@@ -2467,7 +2542,8 @@ def open_serial():
         # This handles the case where the auto-selected port has a PermissionError
         # (e.g. another process holds it, or Windows driver issue)
         all_oserror22 = last_open_error is not None and _is_oserror22(last_open_error)
-        if jumperless_ports:
+        port_was_busy = last_open_error is not None and _is_port_busy_error(last_open_error)
+        if jumperless_ports and not port_was_busy:
             other_ports = [p[0] for p in jumperless_ports if p[0] != portName]
             if other_ports:
                 safe_print(f"Trying other Jumperless ports...", Fore.CYAN)
@@ -2670,7 +2746,6 @@ def _query_firmware_version_on_open_port(ser_port):
 # ============================================================================
 # FIRMWARE MANAGEMENT
 # ============================================================================
-latestFirmware = "5.1.2.6"
 
 def get_latest_release_tag(repo):
     """Return the tag (version string) of a repo's latest GitHub release.
@@ -2691,53 +2766,46 @@ def get_latest_release_tag(repo):
             safe_print(f"Could not fetch latest release for {repo}: {e}", Fore.YELLOW)
     return None
 
-def get_newest_firmware_source(repos):
-    """Pick the repo with the newest firmware release.
-
-    Returns (tag, repo, download_url) for whichever repo published the highest
-    version, or (None, None, None) if none of them yield a usable release.
-    All V5-class repos publish the same 'firmware.uf2' asset, so only the repo
-    differs in the download URL.
-    """
-    best_tag = None
-    best_repo = None
-    for repo in repos:
-        tag = get_latest_release_tag(repo)
-        if not tag:
-            continue
-        # firmware_version_compare(a, b) is True when a >= b; require strictly
-        # newer so the first-listed repo wins ties.
-        if best_tag is None or (tag != best_tag and firmware_version_compare(tag, best_tag)):
-            best_tag = tag
-            best_repo = repo
-    if best_repo is None:
-        return (None, None, None)
-    download_url = f"https://github.com/{best_repo}/releases/latest/download/firmware.uf2"
-    return (best_tag, best_repo, download_url)
-
 def og_backport_version_from_tag(tag):
     """5.7.11.3 -> 1.7.11.3: the OG build of a JumperlOS release swaps the major for 1."""
     return '1.' + str(tag).lstrip('v').split('.', 1)[1]
 
-def get_og_backport_firmware_source():
-    """(og_version, repo, download_url) for the OG-on-JumperlOS image, or Nones.
+FIRMWARE_LINE_NAMES = {'v5': 'V5', 'og_backport': 'JumperlOS backport', 'og_original': 'original (1.3.x)'}
 
-    The JumperlOS release is tagged with the V5 number and carries the OG image
-    as firmware_og_backport.<1.same-tail>.uf2 (release.yml derives that name the
-    same way), so one redirect lookup gives both the version and the URL.
+def firmware_line():
+    """'v5', 'og_backport' or 'og_original': the line we check against and flash.
+
+    A V5 has one line. An OG follows whatever it is running unless the user
+    picked the other line with the 'ogfw' menu command.
     """
-    tag = get_latest_release_tag(firmware_repo_og_backport)
+    if jumperlessV5:
+        return 'v5'
+    return ogFirmwareChoice or ('og_backport' if jumperlessOgBackport else 'og_original')
+
+def resolve_latest_firmware():
+    """Look up the newest release for firmware_line() and remember where it lives.
+
+    Sets latestFirmware / latestFirmwareRepo / latestFirmwareDownloadUrl and
+    returns the version string, or None (globals untouched) if the lookup
+    failed - offline, or a repo with no release.
+    """
+    global latestFirmware, latestFirmwareRepo, latestFirmwareDownloadUrl
+    line = firmware_line()
+    repo = firmware_repo_og_original if line == 'og_original' else firmware_repo
+    tag = get_latest_release_tag(repo)
     if not tag or '.' not in tag:
-        return (None, None, None)
-    og_version = og_backport_version_from_tag(tag)
-    url = (f"https://github.com/{firmware_repo_og_backport}/releases/latest/download/"
-           f"firmware_og_backport.{og_version}.uf2")
-    return (og_version, firmware_repo_og_backport, url)
+        return None
+    asset = "firmware.uf2"
+    if line == 'og_backport':
+        tag = og_backport_version_from_tag(tag)
+        asset = f"firmware_og_backport.{tag}.uf2"
+    latestFirmware, latestFirmwareRepo = tag, repo
+    latestFirmwareDownloadUrl = f"https://github.com/{repo}/releases/latest/download/{asset}"
+    return tag
 
 def check_if_fw_is_old():
     """Check if firmware needs updating"""
-    global currentString, jumperlessFirmwareString, jumperlessV5, jumperlessOgBackport, noWokwiStuff, latestFirmware
-    global latestFirmwareDownloadUrl, latestFirmwareRepo
+    global currentString, jumperlessFirmwareString, jumperlessV5, jumperlessOgBackport, noWokwiStuff
     
     if len(jumperlessFirmwareString) < 2:
         safe_print('\nCould not read FW version from the Jumperless', Fore.YELLOW)
@@ -2777,27 +2845,11 @@ def check_if_fw_is_old():
         jumperlessV5 = (fw_class == 'v5')
         jumperlessOgBackport = (fw_class == 'og_backport')
         
-        # Check latest version online. V5-class firmware lives in two repos now
-        # (JumperlessV5 and JumperlOS); check both and use whichever published the
-        # newer release. An OG running JumperlOS follows the JumperlOS release's
-        # OG asset. Legacy (original OG) firmware stays on the original repo.
-        if jumperlessV5:
-            version, latestFirmwareRepo, latestFirmwareDownloadUrl = get_newest_firmware_source(firmware_repos_v5)
-            if version is None:
-                safe_print("Could not check the latest firmware version online", Fore.YELLOW)
-                return False
-        elif jumperlessOgBackport:
-            version, latestFirmwareRepo, latestFirmwareDownloadUrl = get_og_backport_firmware_source()
-            if version is None:
-                safe_print("Could not check the latest firmware version online", Fore.YELLOW)
-                return False
-        else:
-            response = requests.get("https://github.com/Architeuthis-Flux/Jumperless/releases/latest", timeout=10)
-            version = response.url.rstrip('/').split('/').pop()
-            latestFirmwareRepo = "Architeuthis-Flux/Jumperless"
-            latestFirmwareDownloadUrl = latestFirmwareAddress
-        
-        latestFirmware = version
+        version = resolve_latest_firmware()
+        if version is None:
+            safe_print("Could not check the latest firmware version online", Fore.YELLOW)
+            return False
+
         # firmware_version_compare() pads the shorter version with zeros, so a
         # three-part tag (5.8.0 -> 1.8.0 for the OG) compares correctly against
         # a four-part board version. The zero-padded digit join it replaces read
@@ -2946,12 +2998,15 @@ def _find_bootloader_under(mountpoint, want_v5):
 
 def update_jumperless_firmware(force=False):
     """Update Jumperless firmware"""
-    global ser, menuEntered, serialconnected, updateInProgress, portName, latestFirmware
+    global ser, menuEntered, serialconnected, updateInProgress, portName
     
-    # if not force and not check_if_fw_is_old():
-    #     return
-    # if (force == False):
-    safe_print("\nUpdating your Jumperless to the latest firmware: " + latestFirmware + "\n", Fore.YELLOW)
+    # check_if_fw_is_old() already resolved the download for the automatic path.
+    # A forced (menu) update re-resolves: it may follow an 'ogfw' line switch,
+    # or the startup check may never have run.
+    if (force or not latestFirmwareDownloadUrl) and resolve_latest_firmware() is None:
+        safe_print("Could not look up the latest firmware online (offline?)", Fore.RED)
+        return
+    safe_print(f"\nUpdating your Jumperless to the latest {FIRMWARE_LINE_NAMES[firmware_line()]} firmware: {latestFirmware}\n", Fore.YELLOW)
     
     # Confirm before updating, with a 3-second timeout that defaults to "yes".
     # force=True (explicit user-requested update) skips the prompt entirely.
@@ -2980,26 +3035,7 @@ def update_jumperless_firmware(force=False):
         updateInProgress = 1
         
         try:
-            if jumperlessV5:
-                # Prefer the source resolved by check_if_fw_is_old(); if this is a
-                # forced/manual update that didn't run the check, resolve the newest
-                # of the two V5 repos now. Fall back to the static URL if offline.
-                firmware_url = latestFirmwareDownloadUrl
-                if not firmware_url:
-                    _tag, _repo, firmware_url = get_newest_firmware_source(firmware_repos_v5)
-                if not firmware_url:
-                    firmware_url = latestFirmwareAddressV5
-            elif jumperlessOgBackport:
-                # Same shape as the V5 path. No static fallback: the only static
-                # OG URL is the original 1.3.x image, which would downgrade a
-                # board running JumperlOS.
-                firmware_url = latestFirmwareDownloadUrl
-                if not firmware_url:
-                    _tag, _repo, firmware_url = get_og_backport_firmware_source()
-                if not firmware_url:
-                    raise RuntimeError("could not resolve the OG JumperlOS firmware download (offline?)")
-            else:
-                firmware_url = latestFirmwareAddress
+            firmware_url = latestFirmwareDownloadUrl
             if debugWokwi:
                 safe_print(f"Downloading firmware from: {firmware_url}", Fore.BLUE)
             # Download to a user-writable dir, not the CWD - a packaged/VM launch
@@ -3344,42 +3380,31 @@ def print_upgrade_instructions():
         safe_print(f"  (or: pip install --upgrade {pypi_package_name})", Fore.GREEN)
     safe_print(f"This copy: {os.path.abspath(__file__)}", Fore.BLUE)
 
-def check_for_app_updates():
-    """Check if there's a newer version of the app available"""
-    global App_Version
-    
-    safe_print("Checking for app updates...", Fore.CYAN)
-    
-    latest_version, release_url = get_latest_app_version()
-    if not latest_version:
-        return False
-    
+def package_upgrade_command():
+    """The command that upgrades THIS running copy (see package_install_kind()).
+
+    The install's own manager is preferred so its metadata stays right; when it
+    isn't on PATH, pip inside this venv does the job (pipx venvs share pip).
+    """
+    kind = package_install_kind()
+    if kind == "uv" and shutil.which("uv"):
+        return ["uv", "tool", "upgrade", pypi_package_name]
+    if kind == "pipx" and shutil.which("pipx"):
+        return ["pipx", "upgrade", pypi_package_name]
+    return [sys.executable, "-m", "pip", "install", "--upgrade", pypi_package_name]
+
+def upgrade_installed_package():
+    """Upgrade a pip / pipx / uv install in place. True if the manager reported success."""
+    cmd = package_upgrade_command()
+    safe_print("Running: " + " ".join(cmd), Fore.CYAN)
     try:
-        if compare_versions(App_Version, latest_version):
-            safe_print(f"\nNew app version available!", Fore.GREEN)
-            safe_print(f"Current version: {App_Version}", Fore.YELLOW)
-            safe_print(f"Latest version: {latest_version}", Fore.GREEN)
-            if release_url:
-                safe_print(f"Release notes: {release_url}", Fore.MAGENTA)
-            
-            # Check if we're running from an executable
-            if is_running_from_executable():
-                safe_print("\nRunning from packaged executable - automatic app update not supported.", Fore.YELLOW)
-                safe_print("Please download the latest version from:", Fore.CYAN)
-                safe_print("https://github.com/Architeuthis-Flux/JumperlessV5/releases/latest", Fore.MAGENTA)
-                return False  # Don't attempt automatic update
-            
-            return True
-        else:
-            safe_print(f"App is up to date (version {App_Version})", Fore.GREEN)
-            return False
-            
+        return subprocess.run(cmd, timeout=600).returncode == 0
     except Exception as e:
-        safe_print(f"Error during version comparison: {e}", Fore.RED)
+        safe_print(f"Upgrade failed to run: {e}", Fore.RED)
         return False
 
-def download_app_update():
-    """Download the latest version of the app script"""
+def download_app_update(latest_version):
+    """Download the app script (and requirements) for `latest_version` to temp files."""
     try:
         # Debug mode: copy from local file
         if debug_app_update:
@@ -3404,27 +3429,12 @@ def download_app_update():
             
             return temp_script_path, requirements_path
         
-        # Production mode: download from GitHub
-        # Get the latest firmware version (release tag) for download URL
-        response = requests.get(
-            f"https://api.github.com/repos/{app_update_repo}/releases/latest",
-            timeout=3
-        )
-        if response.status_code != 200:
-            safe_print("Could not fetch latest release info", Fore.RED)
-            return None, None
+        # Production mode: the app repo is tagged v<version> for every PyPI
+        # release, so the raw file at that tag is exactly what pip users get.
+        raw_base = f"https://raw.githubusercontent.com/{app_repo}/v{latest_version}"
+        script_url = f"{raw_base}/{app_script_name}"
         
-        release_data = response.json()
-        firmware_version = release_data.get('tag_name', '').lstrip('v')
-        
-        if not firmware_version:
-            safe_print("Could not determine firmware version for download", Fore.RED)
-            return None, None
-        
-        # Download the main script using firmware version in URL
-        script_url = f"https://github.com/{app_update_repo}/releases/download/{firmware_version}/{app_script_name}"
-        
-        safe_print(f"Downloading {app_script_name} (release {firmware_version})...", Fore.CYAN)
+        safe_print(f"Downloading {app_script_name} (release {latest_version})...", Fore.CYAN)
         
         # Create a temporary file for download
         with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.py') as temp_file:
@@ -3443,7 +3453,7 @@ def download_app_update():
         if new_requirements:
             try:
                 safe_print("Downloading requirements.txt...", Fore.CYAN)
-                requirements_url = f"https://github.com/{app_update_repo}/releases/download/{firmware_version}/{app_requirements_name}"
+                requirements_url = f"{raw_base}/{app_requirements_name}"
                 
                 with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.txt') as temp_req_file:
                     requirements_path = temp_req_file.name
@@ -3549,8 +3559,8 @@ def install_requirements(requirements_path):
         safe_print(f"Error installing requirements: {e}", Fore.RED)
         return False
 
-def perform_app_update():
-    """Perform the complete app update process"""
+def perform_app_update(latest_version):
+    """Replace this raw script with `latest_version` (backup, download, swap)."""
     global updateInProgress, serialconnected, ser
     
     updateInProgress = 1
@@ -3573,7 +3583,7 @@ def perform_app_update():
         backup_path = backup_current_app()
         
         # Download new version
-        new_script_path, requirements_path = download_app_update()
+        new_script_path, requirements_path = download_app_update(latest_version)
         if not new_script_path:
             safe_print("Update download failed", Fore.RED)
             return False
@@ -3614,6 +3624,10 @@ pause
                 # Unix-like systems: direct replacement
                 shutil.move(new_script_path, current_script)
                 safe_print("App updated successfully!", Fore.GREEN)
+            # _read_app_version() reads VERSION beside the script; without this
+            # the new copy still reports the old version and re-offers forever.
+            with open(os.path.join(os.path.dirname(os.path.abspath(current_script)), "VERSION"), "w", encoding="utf-8") as vf:
+                vf.write(latest_version + "\n")
         
         except Exception as e:
             safe_print(f"Error replacing app file: {e}", Fore.RED)
@@ -3668,34 +3682,39 @@ def update_app_if_needed():
         if release_url:
             safe_print(f"Details: {release_url}", Fore.MAGENTA)
         
-        # pip/pipx installs must upgrade through their package manager — check
+        # pip/pipx/uv installs upgrade through their package manager — check
         # this BEFORE is_running_from_executable(), since a console-script entry
         # point also looks like an "executable" (argv[0] has no .py suffix).
+        # Same prompt shape as the firmware update: yes unless the user says no.
         if is_pip_installed():
+            safe_print("Update now? [Y] (continuing automatically in 5s, any key to skip)", Fore.CYAN)
+            if input_with_timeout("> ", timeout=5, default="y").strip().lower() in ['y', 'yes']:
+                if upgrade_installed_package():
+                    safe_print("App updated. Restarting...", Fore.GREEN)
+                    cleanup_on_exit()
+                    # -m jumperless_pkg works however the install was launched
+                    # (console script, `python -m`, Windows .exe shim).
+                    os.execv(sys.executable, [sys.executable, "-m", "jumperless_pkg"] + sys.argv[1:])
+                safe_print("Automatic upgrade didn't complete.", Fore.YELLOW)
             print_upgrade_instructions()
             return
         
         # Frozen/packaged executables can't self-overwrite either.
         if is_running_from_executable():
             safe_print("\nRunning from a packaged executable - download the latest from:", Fore.YELLOW)
-            safe_print("https://github.com/Architeuthis-Flux/JumperlessV5/releases/latest", Fore.CYAN)
+            safe_print(app_releases_page, Fore.CYAN)
             return
         
-        # Raw-script mode: offer the in-place self-update (legacy GitHub path).
-        safe_print("\nWould you like to update the app now?", Fore.CYAN)
-        
-        # Use simple input() instead of timeout input for better reliability
-        try:
-            user_response = input("Update now? (y/N): ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            user_response = "n"
+        # Raw-script mode: offer the in-place self-update.
+        safe_print("Update now? [Y] (continuing automatically in 5s, any key to skip)", Fore.CYAN)
+        user_response = input_with_timeout("> ", timeout=5, default="y").strip().lower()
         
         if debugWokwi:
             safe_print(f"User response: '{user_response}'", Fore.BLUE)
         
         if user_response in ['y', 'yes']:
             safe_print("Starting app update...", Fore.GREEN)
-            success = perform_app_update()
+            success = perform_app_update(latest_version)
             
             if success:
                 safe_print("Restarting app...", Fore.CYAN)
@@ -4571,7 +4590,7 @@ def upload_with_attempts_limit(sketch_dir, arduino_port, fqbn, build_dir, discov
 
 def bridge_menu():
     """Main bridge menu"""
-    global menuEntered, wokwiUpdateRate, numAssignedSlots, currentString, noWokwiStuff, disableArduinoFlashing, noArduinocli, arduinoPort, debugWokwi, interactive_mode, debug_app_update, currentActiveSlot
+    global menuEntered, wokwiUpdateRate, numAssignedSlots, currentString, noWokwiStuff, disableArduinoFlashing, noArduinocli, arduinoPort, debugWokwi, interactive_mode, debug_app_update, currentActiveSlot, ogFirmwareChoice
 
     safe_print("\n\n         Jumperless App Menu\n", Fore.MAGENTA)
     
@@ -4585,9 +4604,16 @@ def bridge_menu():
     safe_print(" 'arduino'     to " + ("enable" if disableArduinoFlashing else "disable") + " Arduino flashing from wokwi", Fore.RED)
     safe_print(" 'debug'       to " + ("disable" if debugWokwi else "enable") + " Wokwi debug output - " + ("on" if debugWokwi else "off"), Fore.MAGENTA)
     safe_print(" 'config'      to edit Arduino CLI upload configuration", Fore.YELLOW)
-    safe_print(" 'update'      to force firmware update - yours is up to date (" + currentString + ")", Fore.BLUE)
+    fw_line = firmware_line()
+    fw_note = f"installed {currentString}, latest {latestFirmware or 'unknown'}"
+    if fw_line != 'v5':
+        fw_note += f", line: {FIRMWARE_LINE_NAMES[fw_line]}"
+    safe_print(" 'update'      to force firmware update (" + fw_note + ")", Fore.BLUE)
+    if fw_line != 'v5':
+        other_line = 'og_original' if fw_line == 'og_backport' else 'og_backport'
+        safe_print(" 'ogfw'        to switch this OG Jumperless to the " + FIRMWARE_LINE_NAMES[other_line] + " firmware", Fore.BLUE)
     debug_status = " [DEBUG MODE]" if debug_app_update else ""
-    executable_status = " (manual download only)" if is_running_from_executable() else ""
+    executable_status = " (manual download only)" if is_running_from_executable() and not is_pip_installed() else ""
     safe_print(" 'appupdate'   to check for app updates - current version " + App_Version + debug_status + executable_status, Fore.MAGENTA)
     safe_print(" 'debugupdate' to " + ("disable" if debug_app_update else "enable") + " app update debug mode", Fore.BLUE)
     safe_print(" 'status'      to check the serial connection status", Fore.RED)
@@ -4644,6 +4670,22 @@ def bridge_menu():
                 menuEntered = 0
                 ser.write(b'm')
                 return
+            elif choice == 'ogfw' and firmware_line() != 'v5':
+                previous_choice = ogFirmwareChoice
+                ogFirmwareChoice = 'og_original' if firmware_line() == 'og_backport' else 'og_backport'
+                version = resolve_latest_firmware()
+                if version is None:
+                    ogFirmwareChoice = previous_choice
+                    safe_print("Could not look up the latest firmware online (offline?)", Fore.RED)
+                    continue
+                safe_print(f"Firmware line set to {FIRMWARE_LINE_NAMES[ogFirmwareChoice]}: latest {version} (installed {currentString})", Fore.CYAN)
+                if input("Flash it now? [y/N] > ").strip().lower() in ('y', 'yes'):
+                    update_jumperless_firmware(force=True)
+                    menuEntered = 0
+                    ser.write(b'm')
+                    return
+                safe_print("Run 'update' when you want to flash it", Fore.YELLOW)
+                continue
             elif choice == 'appupdate':
                 safe_print("Checking for app updates...", Fore.CYAN)
                 update_app_if_needed()
@@ -4723,8 +4765,8 @@ def bridge_menu():
                 safe_print(f"Arduino Port: {arduinoPort if arduinoPort else 'None'} " + ("(Connectable)" if arduinoPortStatus else "(Busy)"), Fore.GREEN if arduinoPortStatus else Fore.RED)
                 safe_print(f"Firmware: {currentString}", Fore.CYAN) 
                 safe_print(f"Jumperless V5: {'Yes' if jumperlessV5 else 'No'}", Fore.MAGENTA if jumperlessV5 else Fore.BLUE)
-                if jumperlessOgBackport:
-                    safe_print("OG Jumperless running JumperlOS (updates follow the JumperlOS release)", Fore.MAGENTA)
+                if not jumperlessV5:
+                    safe_print(f"OG firmware line: {FIRMWARE_LINE_NAMES[firmware_line()]}" + (" (running JumperlOS backport)" if jumperlessOgBackport else ""), Fore.MAGENTA)
                 safe_print(f"Arduino CLI: {'Available' if not noArduinocli else 'Not Available'}" + (" - version: " + get_installed_arduino_cli_version() if not noArduinocli else ""), Fore.CYAN if not noArduinocli else Fore.YELLOW)
                 safe_print(f"Arduino Flashing: {'Enabled' if not disableArduinoFlashing and not noArduinocli else 'Disabled'}", Fore.MAGENTA if not disableArduinoFlashing and not noArduinocli else Fore.BLUE)
                 # safe_print(f"Arduino CLI Version: {get_installed_arduino_cli_version()}", Fore.CYAN)
@@ -5992,13 +6034,36 @@ def process_wokwi_sketch_and_flash(wokwi_url, slot_number=None):
 
 def check_presence(correct_port, interval):
     """Monitor serial port presence and reconnect if needed"""
-    global ser, portName, justreconnected, serialconnected, portNotFound, updateInProgress, shutting_down
+    global ser, portName, justreconnected, serialconnected, portNotFound, updateInProgress, shutting_down, portYieldedTo
+    busy_reported = False  # one line, not one per poll, while someone else has the port
     while True:
         # Exit thread if shutting down
         if shutting_down:
             return
         if updateInProgress == 0:
             try:
+                # Someone asked for the port (see PORT_LEASE_FILE): let go now and
+                # stay off it until the lease is gone.
+                holder = port_lease_holder()
+                if holder:
+                    with serial_lock:
+                        if ser:
+                            try:
+                                ser.close()
+                            except Exception:
+                                pass
+                        ser = None
+                        serialconnected = 0
+                        portNotFound = 1
+                    if holder != portYieldedTo:
+                        safe_print(f"\rGave {correct_port} to {holder}; reconnecting when it lets go (or: rm {PORT_LEASE_FILE})", Fore.YELLOW)
+                        portYieldedTo = holder
+                    time.sleep(interval)
+                    continue
+                if portYieldedTo is not None:
+                    safe_print(f"\rPort lease released; reconnecting to {correct_port}...", Fore.CYAN)
+                    portYieldedTo = None
+
                 # Check if the port is actually available in the system
                 port_found = False
                 try:
@@ -6044,6 +6109,7 @@ def check_presence(correct_port, interval):
                             portNotFound = 0
                             justreconnected = 1
                         
+                        busy_reported = False
                         safe_print(f"\rReconnected to {correct_port}", Fore.GREEN)
                         safe_print(f"\r", Fore.GREEN)
                         disable_interactive_mode()
@@ -6058,6 +6124,13 @@ def check_presence(correct_port, interval):
                             ser = None
                             serialconnected = 0
                             portNotFound = 1
+                        if _is_port_busy_error(e):
+                            # Another program (JumperIDE, a serial monitor, a script that
+                            # didn't take a lease) has it. Say so once and don't hammer it.
+                            if not busy_reported:
+                                safe_print(f"\r{correct_port} is in use by another program; will reconnect when it's free", Fore.YELLOW)
+                                busy_reported = True
+                            time.sleep(1.0)
                             
                 elif not port_found and currently_connected:
                     # Port not found in system but we think we're connected, mark as disconnected

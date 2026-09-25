@@ -407,6 +407,52 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ---------------------------------------------------------------------------
+  # PyPI. The `jumperless` package is what pip / pipx / uv installs upgrade
+  # themselves from, so it ships on every v* tag with the binaries. Needs a
+  # PYPI_API_TOKEN secret (pypi.org -> Account settings -> API tokens, scoped
+  # to the jumperless project); skipped with a warning when absent, so the
+  # manual tools/publish_pypi.sh --prod still works as a fallback.
+  # ---------------------------------------------------------------------------
+  publish-pypi:
+    needs: version
+    runs-on: ubuntu-latest
+    if: github.repository == 'Architeuthis-Flux/Jumperless-App' && startsWith(github.ref, 'refs/tags/v')
+    env:
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+
+    steps:
+    - uses: actions/checkout@v5
+
+    - uses: actions/setup-python@v6
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Tag must match VERSION
+      run: |
+        if [ "v${{ needs.version.outputs.version }}" != "${GITHUB_REF_NAME}" ]; then
+          echo "::error::Tag ${GITHUB_REF_NAME} does not match VERSION (v${{ needs.version.outputs.version }})"
+          exit 1
+        fi
+
+    - name: Build sdist + wheel
+      run: |
+        python Scripts/prepare_jumperless_pkg.py
+        python -m pip install --upgrade build twine
+        python -m build
+        python -m twine check dist/*
+
+    - name: Warn if PyPI publishing is not configured
+      if: env.PYPI_API_TOKEN == ''
+      run: echo "::warning::PYPI_API_TOKEN secret is not set. Skipping the PyPI upload; run tools/publish_pypi.sh --prod by hand."
+
+    - name: Publish to PyPI
+      if: env.PYPI_API_TOKEN != ''
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        password: ${{ secrets.PYPI_API_TOKEN }}
+        skip-existing: true
+
+  # ---------------------------------------------------------------------------
   # Mirror the polished single-file installers (macOS .dmg, Windows .exe,
   # Linux .AppImage) onto the JumperlessV5 "latest" release, where firmware.uf2
   # lives. No zip/tar.gz bundles and no launcher zips go to JumperlessV5.

@@ -7,7 +7,7 @@ There are four outputs:
 
 | Output | What it is | Built by |
 |--------|------------|----------|
-| PyPI `jumperless` | `pip install jumperless` / `uv tool install jumperless` | `tools/publish_pypi.sh` (manual) |
+| PyPI `jumperless` | `pip install jumperless` / `uv tool install jumperless` | CI `publish-pypi` job on `v*` tags (needs `PYPI_API_TOKEN`) / `tools/publish_pypi.sh --prod` |
 | Windows `.exe` | single-file console executable | CI `build` job / `tools/build_local.py` |
 | macOS `.dmg` | signed + notarized universal2 `.app` installer | CI `build-macos` job / `tools/build-macos-installer.sh` |
 | Linux `.AppImage` | single-file executable (+ `.tar.gz` fallback) | CI `build` job / `tools/build_local.py` |
